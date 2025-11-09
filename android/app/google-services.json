@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "66941464379",
+    "project_id": "notion-task-d035f",
+    "storage_bucket": "notion-task-d035f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:66941464379:android:f177069a28dd1c89c0511e",
+        "android_client_info": {
+          "package_name": "com.mobilenote"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDkkR1o7WuVhYwiIt4tfPIO1_q2iYtvrzA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
