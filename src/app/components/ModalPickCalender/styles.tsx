@@ -1,0 +1,60 @@
+import {StyleSheet} from 'react-native';
+import {Color, Font} from '../../../constants';
+
+export default StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  container: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    overflow: 'hidden',
+    width: '90%',
+  },
+  footer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    padding: 12,
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderColor: '#eee',
+  },
+  footerText: {
+    fontSize: 16,
+  },
+  footerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+   btnDelete: {
+    backgroundColor: '#f1f1f1',
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+    borderRadius: 4,
+  },
+  btnDeleteText: {
+    color: '#000',
+  },
+  btnConfirm: {
+    backgroundColor: Color.primary01,
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+    borderRadius: 4,
+  },
+  btnConfirmText: {
+    color: '#fff',
+  },
+   headerYM: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 12,
+    borderBottomWidth: 1,
+    borderColor: '#eee',
+  },
+});

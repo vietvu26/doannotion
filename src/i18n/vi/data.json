@@ -1,0 +1,15 @@
+{
+  "homeInformation": {
+    "staffInformation": "Thông tin nhân viên",
+    "department": "Phòng ban",
+    "title": "Chức danh",
+    "gender": "Giới tính",
+    "dateOfBirth": "Ngày sinh",
+    "taxCode": "Mã số thuế",
+    "companyInformation": "Thông tin công ty",
+    "representativeInformation": "Thông tin người đại diện",
+    "companyName": "Tên công ty",
+    "career": "Ngành nghề",
+    "companyAddress": "Địa chỉ công ty"
+  }
+}
