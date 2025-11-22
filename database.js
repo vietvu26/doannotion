@@ -67,15 +67,19 @@ var transporter = nodemailer.createTransport({
   }
 });
 
-app.listen(3000, function() {
-    console.log('Node server running @ http://localhost:3000');
+// Lấy PORT từ environment variable (cho Render) hoặc dùng 3000 (local)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, function() {
+    console.log(`Node server running @ http://localhost:${PORT}`);
 });
 
+// MySQL Connection - Hỗ trợ Environment Variables (cho Render) hoặc local
 var con = mysql.createConnection({
-  host: "localhost",
-  user: "root",
-  password: "26122003",
-  database: "notion_db"
+  host: process.env.DB_HOST || process.env.MYSQLHOST || "localhost",
+  user: process.env.DB_USER || process.env.MYSQLUSER || "root",
+  password: process.env.DB_PASSWORD || process.env.MYSQLPASSWORD || "26122003",
+  database: process.env.DB_NAME || process.env.MYSQLDATABASE || "notion_db",
+  port: process.env.DB_PORT || process.env.MYSQLPORT || 3306
 });
 
 // ============================================
