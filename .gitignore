@@ -73,4 +73,7 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
-echo "notion-task-d035f-firebase-adminsdk-fbsvc-afe9d9d4d0.json" >> .gitignore
+
+# Firebase Service Account (contains secrets - DO NOT COMMIT)
+notion-task-d035f-firebase-adminsdk-fbsvc-afe9d9d4d0.json
+**/notion-task-d035f-firebase-adminsdk-*.json
