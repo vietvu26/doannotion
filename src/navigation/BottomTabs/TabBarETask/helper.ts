@@ -1,12 +1,9 @@
-// import Home
-
-import DashboardApp from "../../../app/screen/DashboardApp";
-import HomeNotion from "../../../app/screen/Notion/Home";
-import EditorScreen from "../../../app/screen/Notion/Editor";
-import SearchScreen from "../../../app/screen/Notion/Search";
-
-
+// Tab names for ETask bottom navigation
 export const TabName = {
+  ETaskHome: 'ETaskHome',
+  ETaskStatistics: 'ETaskStatistics',
+  ETaskNotification: 'ETaskNotification',
+  // Legacy tab names (for Notion - kept for backward compatibility)
   Dashboard: 'Dashboard',
   Search: 'Search',
   Editor: 'Editor',
@@ -19,25 +16,5 @@ export type BottomTabitem = {
   permission: string | null;
 };
 
-export const listBottomTab: BottomTabitem[] = [
-  {
-    name: TabName.Dashboard,
-    component: DashboardApp,
-    permission: null,
-  },
-  {
-    name: TabName.Editor,
-    component: EditorScreen,
-    permission: null,
-  },
-  {
-    name: TabName.Search,
-    component: SearchScreen,
-    permission: null,
-  },
-  {
-    name: TabName.Home,
-    component: HomeNotion,
-    permission: null,
-  },
-];
+// Legacy listBottomTab removed - not used for ETask navigation
+// If needed for Notion tabs, should be in a separate helper file

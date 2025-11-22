@@ -11,6 +11,7 @@ import {
   TouchableOpacity,
   Image,
   AppState,
+  Dimensions,
 } from 'react-native';
 import { Icon } from '@ui-kitten/components';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
@@ -45,6 +46,8 @@ const DetailScreen = () => {
   const richTextRef = useRef<InputRichTextRef>(null);
   const [title, setTitle] = useState(notionItem?.title || '');
   const [isSaving, setIsSaving] = useState(false);
+  const [notionData, setNotionData] = useState<NotionItem | null>(notionItem || null);
+  const [loadingNotion, setLoadingNotion] = useState(false);
   const [showShareSheet, setShowShareSheet] = useState(false);
   const [canEdit, setCanEdit] = useState(true); // Mặc định cho phép edit
   const [permission, setPermission] = useState<'full' | 'comment' | 'view' | null>('full');
@@ -179,12 +182,57 @@ const DetailScreen = () => {
     };
   }, [notionItem?.id, fetchComments]);
   
-  // Load nội dung ban đầu vào editor
-  useEffect(() => {
-    if (notionItem?.content) {
-      richTextRef.current?.setContent(notionItem.content);
+  // Fetch notion data từ database khi vào màn hình
+  const fetchNotionData = React.useCallback(async () => {
+    if (!notionItem?.id) {
+      return;
     }
-  }, [notionItem]);
+
+    try {
+      setLoadingNotion(true);
+      const response = await axios.get(
+        `${getApiUrl()}/api/notion-by-id/${notionItem.id}`
+      );
+      
+      if (response.data && response.data.success && response.data.data) {
+        const fetchedNotion = response.data.data;
+        setNotionData(fetchedNotion);
+        // Cập nhật title và content từ database
+        setTitle(fetchedNotion.title || '');
+        
+        // Đợi một chút để đảm bảo richTextRef đã sẵn sàng
+        setTimeout(() => {
+          if (fetchedNotion.content && richTextRef.current) {
+            richTextRef.current.setContent(fetchedNotion.content);
+          }
+        }, 100);
+      }
+    } catch (error) {
+      console.error('Error fetching notion data:', error);
+      // Nếu lỗi, vẫn dùng dữ liệu từ route params
+    } finally {
+      setLoadingNotion(false);
+    }
+  }, [notionItem?.id]);
+
+  // Fetch lại dữ liệu khi màn hình được focus
+  useFocusEffect(
+    React.useCallback(() => {
+      fetchNotionData();
+    }, [fetchNotionData])
+  );
+
+  // Load nội dung ban đầu vào editor (chỉ lần đầu khi mount)
+  useEffect(() => {
+    if (notionItem?.content && !notionData) {
+      // Đợi một chút để đảm bảo richTextRef đã sẵn sàng
+      setTimeout(() => {
+        if (richTextRef.current) {
+          richTextRef.current.setContent(notionItem.content);
+        }
+      }, 100);
+    }
+  }, []);
 
   // Hàm để dismiss keyboard và blur editor
   const handleDismissKeyboard = () => {
@@ -204,27 +252,30 @@ const DetailScreen = () => {
       return;
     }
     
-    // Kiểm tra nếu không có nội dung thì chỉ quay về không lưu
-    const content = richTextRef.current?.getContent() || '';
-    const titleValue = title.trim();
-    
-    // Nếu cả title và content đều rỗng, chỉ quay về
-    if (titleValue === '' && content === '') {
-      console.log('Editor trống, không lưu gì');
-      navigation.goBack();
-      return;
-    }
-    
     setIsSaving(true);
     
     try {
+      // Lấy content từ RichEditor (luôn là Promise)
+      const content = await (richTextRef.current?.getContent() || Promise.resolve(''));
+      const finalContent = content || '';
+      
+      const titleValue = title.trim();
+      
+      // Nếu cả title và content đều rỗng, chỉ quay về
+      if (titleValue === '' && finalContent === '') {
+        console.log('Editor trống, không lưu gì');
+        setIsSaving(false);
+        navigation.goBack();
+        return;
+      }
+      
       const finalTitle = titleValue === '' ? 'Không có tiêu đề' : titleValue;
       
       const response = await axios.put(
         `${getApiUrl()}/api/update-notion/${notionItem.id}`,
         {
           title: finalTitle,
-          content: content,
+          content: finalContent,
           icon: notionItem.icon,
           userId: currentUserId, // Gửi userId để kiểm tra quyền
         }
@@ -591,17 +642,18 @@ const DetailScreen = () => {
       </TouchableWithoutFeedback>
 
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={{ flex: 1 }}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
         <View style={{ flex: 1, backgroundColor: '#fff' }}>
           <ScrollView 
             style={{ flex: 1, backgroundColor: '#fff' }}
-            contentContainerStyle={{ flexGrow: 1, backgroundColor: '#fff' }}
+            contentContainerStyle={{ paddingBottom: 100 }}
             keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
           >
-            <View style={{ flex: 1, padding: 24, backgroundColor: '#fff' }}>
+            <View style={{ padding: 24, backgroundColor: '#fff' }}>
               {/* Title input */}
               <TextInput
                 ref={titleRef}
@@ -866,11 +918,15 @@ const DetailScreen = () => {
                   <TextCM style={{ color: '#000' }}>Đang tải...</TextCM>
                 </View>
               ) : (
-                <InputRichText 
-                  ref={richTextRef}
-                  initialValue=""
-                  editable={canEdit}
-                />
+                <View style={{ flex: 1, minHeight: 400 }}>
+                  <InputRichText 
+                    key={notionData?.id || notionItem?.id}
+                    ref={richTextRef}
+                    initialValue={notionData?.content || notionItem?.content || ""}
+                    editable={canEdit}
+                    containerStyle={{ flex: 1 }}
+                  />
+                </View>
               )}
             </View>
           </ScrollView>

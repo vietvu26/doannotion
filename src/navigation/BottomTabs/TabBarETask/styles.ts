@@ -36,7 +36,7 @@ export default StyleSheet.create({
   txtLabelSelect: {
     fontSize: FontSize.FontTiniest,
     fontFamily: Font.InterSemiBold600,
-    color: '#ca1e66',
+    color: '#7C3AED',
     textAlign: 'center',
   },
   ctnLine: {

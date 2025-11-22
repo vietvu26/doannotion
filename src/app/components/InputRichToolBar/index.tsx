@@ -3,6 +3,7 @@ import React, {
   useRef,
   useState,
   forwardRef,
+  useEffect,
 } from 'react';
 import {View, Platform, ScrollView} from 'react-native';
 import {actions, RichEditor, RichToolbar} from 'react-native-pell-rich-editor';
@@ -36,7 +37,7 @@ type InputRichTextProps = {
 export type InputRichTextRef = {
   focus: () => void;
   blur: () => void;
-  getContent: () => string;
+  getContent: () => Promise<string>;
   setContent: (html: string) => void;
 };
 
@@ -57,13 +58,49 @@ const InputRichText = forwardRef<InputRichTextRef, InputRichTextProps>(
     const [showToolbar, setShowToolbar] = useState(false);
     const [text, setText] = useState(initialValue);
     const editorRef = useRef<RichEditor>(null);
+    const [isInitialized, setIsInitialized] = useState(false);
+
+    // Update editor khi initialValue thay đổi từ bên ngoài
+    useEffect(() => {
+      if (initialValue !== text && editorRef.current && isInitialized) {
+        editorRef.current.setContentHTML(initialValue);
+        setText(initialValue);
+      }
+    }, [initialValue]);
+
+    // Đánh dấu đã initialized sau khi mount
+    useEffect(() => {
+      setIsInitialized(true);
+    }, []);
 
     useImperativeHandle(ref, () => ({
       focus: () => editorRef.current?.focusContentEditor?.(),
       blur: () => {
         editorRef.current?.blurContentEditor?.();        
       },
-      getContent: () => text,
+      getContent: () => {
+        return new Promise<string>((resolve) => {
+          // Thử lấy content từ RichEditor
+          if (editorRef.current?.getContentHtml) {
+            try {
+              const result = editorRef.current.getContentHtml();
+              // getContentHtml trả về Promise<string>
+              if (result && typeof result.then === 'function') {
+                result.then((html: string) => resolve(html || text)).catch(() => resolve(text));
+              } else {
+                // Fallback về state text nếu không phải Promise
+                resolve(text);
+              }
+            } catch (error) {
+              // Nếu có lỗi, fallback về state text
+              resolve(text);
+            }
+          } else {
+            // Fallback về state text nếu không có method
+            resolve(text);
+          }
+        });
+      },
       setContent: (html: string) => {
         editorRef.current?.setContentHTML(html);
         setText(html);
@@ -133,7 +170,7 @@ const InputRichText = forwardRef<InputRichTextRef, InputRichTextProps>(
             ]}
             editorStyle={{
               backgroundColor: 'transparent',
-              contentCSSText: `font-size: 16px; min-height: 300px; padding: 12px; ${!editable ? 'pointer-events: none; user-select: none;' : ''}`,
+              contentCSSText: `font-size: 16px; line-height: 1.8; min-height: 300px; padding: 12px; ${!editable ? 'pointer-events: none; user-select: none;' : ''}`,
             }}
             placeholder='Nhâp nội dung...'
             useContainer={false}

@@ -2,8 +2,8 @@ import { Platform } from 'react-native';
 
 
 
-const YOUR_COMPUTER_IP = '192.168.1.50'; 
-const PRODUCTION_API_URL = 'http://192.168.1.50:3000'; 
+const YOUR_COMPUTER_IP = '192.168.52.102'; 
+const PRODUCTION_API_URL = 'http://192.168.52.102:3000'; 
 
 export const getApiUrl = (): string => {
   if (__DEV__) {

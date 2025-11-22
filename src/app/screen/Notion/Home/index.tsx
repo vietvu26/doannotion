@@ -12,6 +12,7 @@
   import { NavigationName } from '../../../../constants';
   import { useAppSelector } from '../../../../hooks/useRedux';
   import { getApiUrl } from '../../../../config/api.config';
+  import PagingCM from '../../../components/Paging';
 
   export type NotionItem = {
     id: number;
@@ -37,6 +38,8 @@
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [refreshFlag, setRefreshFlag] = useState(0);
+    const [currentPage, setCurrentPage] = useState(1);
+    const ITEMS_PER_PAGE = 10;
 
     const fetchData = async () => {
       if (!currentUserId) {
@@ -63,6 +66,7 @@
             .filter((item: NotionItem) => item.parentFileId === null)
             .sort((a: NotionItem, b: NotionItem) => a.order - b.order);
           setNotionList(data);
+          setCurrentPage(1); // Reset về trang đầu khi fetch lại data
           console.log('Notion list loaded:', data.length, 'items');
         } else {
           console.error('Invalid response format:', res.data);
@@ -131,7 +135,16 @@
         return;
       }
 
-      const newOrder = data.map((item, index) => ({ id: item.id, order: index }));
+      // Cập nhật lại notionList với thứ tự mới từ trang hiện tại
+      const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+      const newList = [...notionList];
+      data.forEach((item, index) => {
+        newList[startIndex + index] = item;
+      });
+      setNotionList(newList);
+
+      // Tính toán order mới dựa trên vị trí trong toàn bộ list
+      const newOrder = newList.map((item, index) => ({ id: item.id, order: index }));
       try {
         const res = await fetch(`${getApiUrl()}/api/update-order`, {
           method: 'POST',
@@ -203,11 +216,11 @@
           title=""
           renderContentRight={() => (
             <View style={{ flexDirection: 'row', gap: 10 }}>
-            <Pressable>
-              <Icon fill={'#fff'} name="bell-outline" width={24} height={24} />
-            </Pressable>
+            {/* <Pressable>
+              <Icon fill={'#fff'} name="bell" width={24} height={24} />
+            </Pressable> */}
             <Pressable onPress={() => navigation.navigate(NavigationName.Dashboard)}>
-              <Icon fill={'#fff'} name="home-outline" width={24} height={24} />
+              <Icon fill={'#fff'} name="home" width={24} height={24} />
             </Pressable>
             </View>
           )}
@@ -219,7 +232,7 @@
           </View>
         ) : error ? (
           <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 50, paddingHorizontal: 20 }}>
-            <Icon name="alert-circle-outline" fill="#ca1e66" width={48} height={48} />
+            <Icon name="alert-circle" fill="#ca1e66" width={48} height={48} />
             <TextCM style={{ marginTop: 10, color: '#666', textAlign: 'center' }}>{error}</TextCM>
             <TouchableOpacity 
               onPress={fetchData}
@@ -241,7 +254,7 @@
                 </View>
               ) : sharedNotions.length === 0 ? (
                 <View style={{ padding: 20, alignItems: 'center' }}>
-                  <Icon name="file-text-outline" fill="#ccc" width={48} height={48} />
+                  <Icon name="file-text" fill="#ccc" width={48} height={48} />
                   <TextCM style={{ marginTop: 10, color: '#999', fontSize: 14 }}>
                     Chưa có trang nào được chia sẻ với bạn
                   </TextCM>
@@ -255,17 +268,17 @@
                       onPress={() => handleNotionPress(item)}
                       activeOpacity={0.7}
                     >
-                      <Icon name="arrow-forward-outline" width={16} height={16} fill="#666" style={{ marginRight: 8 }} />
-                      <Icon name="file-text-outline" width={20} height={20} fill="#666" style={{ marginRight: 8 }} />
+                      <Icon name="arrow-forward" width={16} height={16} fill="#666" style={{ marginRight: 8 }} />
+                      <Icon name="file-text" width={20} height={20} fill="#666" style={{ marginRight: 8 }} />
                       <TextCM style={homeStyles.sharedItemTitle} numberOfLines={1}>
                         {item.title || 'Chưa có tiêu đề'}
                       </TextCM>
                       <View style={{ flexDirection: 'row', gap: 8, marginLeft: 'auto' }}>
                         <Pressable>
-                          <Icon name="more-horizontal-outline" width={18} height={18} fill="#666" />
+                          <Icon name="more-horizontal" width={18} height={18} fill="#666" />
                         </Pressable>
                         <Pressable>
-                          <Icon name="plus-outline" width={18} height={18} fill="#666" />
+                          <Icon name="plus" width={18} height={18} fill="#666" />
                         </Pressable>
                       </View>
                     </TouchableOpacity>
@@ -279,65 +292,89 @@
             </View>
           </View>
         ) : (
-          <DraggableFlatList
-            data={notionList}
-            onDragEnd={({ data }) => handleDragEnd(data)}
-            keyExtractor={item => item.id.toString()}
-            ListHeaderComponent={() => (
-              <>
-                {/* Section "Đã chia sẻ với tôi" */}
-                <View style={homeStyles.sectionContainer}>
-                  <View style={homeStyles.sectionHeader}>
-                    <TextCM style={homeStyles.sectionTitle}>Đã chia sẻ với tôi</TextCM>
+          <>
+            <DraggableFlatList
+              data={notionList.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)}
+              onDragEnd={({ data }) => handleDragEnd(data)}
+              keyExtractor={item => item.id.toString()}
+              ListHeaderComponent={() => (
+                <>
+                  {/* Section "Đã chia sẻ với tôi" */}
+                  <View style={homeStyles.sectionContainer}>
+                    <View style={homeStyles.sectionHeader}>
+                      <TextCM style={homeStyles.sectionTitle}>Đã chia sẻ với tôi</TextCM>
+                    </View>
+                    {loadingShared ? (
+                      <View style={{ padding: 20, alignItems: 'center' }}>
+                        <ActivityIndicator size="small" color="#ca1e66" />
+                      </View>
+                    ) : sharedNotions.length === 0 ? (
+                      <View style={{ padding: 20, alignItems: 'center' }}>
+                        <Icon name="file-text" fill="#ccc" width={48} height={48} />
+                        <TextCM style={{ marginTop: 10, color: '#999', fontSize: 14 }}>
+                          Chưa có trang nào được chia sẻ với bạn
+                        </TextCM>
+                      </View>
+                    ) : (
+                      <View style={homeStyles.sharedListContainer}>
+                        {sharedNotions.map((item) => (
+                          <TouchableOpacity
+                            key={item.id}
+                            style={homeStyles.sharedItem}
+                            onPress={() => handleNotionPress(item)}
+                            activeOpacity={0.7}
+                          >
+                            <Icon name="arrow-forward-outline" width={16} height={16} fill="#666" style={{ marginRight: 8 }} />
+                            <Icon name="file-text-outline" width={20} height={20} fill="#666" style={{ marginRight: 8 }} />
+                            <TextCM style={homeStyles.sharedItemTitle} numberOfLines={1}>
+                              {item.title || 'Chưa có tiêu đề'}
+                            </TextCM>
+                            
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
                   </View>
-                  {loadingShared ? (
-                    <View style={{ padding: 20, alignItems: 'center' }}>
-                      <ActivityIndicator size="small" color="#ca1e66" />
-                    </View>
-                  ) : sharedNotions.length === 0 ? (
-                    <View style={{ padding: 20, alignItems: 'center' }}>
-                      <Icon name="file-text-outline" fill="#ccc" width={48} height={48} />
-                      <TextCM style={{ marginTop: 10, color: '#999', fontSize: 14 }}>
-                        Chưa có trang nào được chia sẻ với bạn
-                      </TextCM>
-                    </View>
-                  ) : (
-                    <View style={homeStyles.sharedListContainer}>
-                      {sharedNotions.map((item) => (
-                        <TouchableOpacity
-                          key={item.id}
-                          style={homeStyles.sharedItem}
-                          onPress={() => handleNotionPress(item)}
-                          activeOpacity={0.7}
-                        >
-                          <Icon name="arrow-forward-outline" width={16} height={16} fill="#666" style={{ marginRight: 8 }} />
-                          <Icon name="file-text-outline" width={20} height={20} fill="#666" style={{ marginRight: 8 }} />
-                          <TextCM style={homeStyles.sharedItemTitle} numberOfLines={1}>
-                            {item.title || 'Chưa có tiêu đề'}
-                          </TextCM>
-                          
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
-                </View>
 
-                {/* Section "Riêng tư" */}
-                <View style={homeStyles.sectionContainer}>
-                  <View style={homeStyles.sectionHeader}>
-                    <TextCM style={homeStyles.sectionTitle}>Riêng tư</TextCM>
+                  {/* Section "Riêng tư" */}
+                  <View style={homeStyles.sectionContainer}>
+                    <View style={homeStyles.sectionHeader}>
+                      <TextCM style={homeStyles.sectionTitle}>Riêng tư</TextCM>
+                      {notionList.length > ITEMS_PER_PAGE && (
+                        <TextCM style={homeStyles.sectionSubtitle}>
+                          {((currentPage - 1) * ITEMS_PER_PAGE + 1)}-{Math.min(currentPage * ITEMS_PER_PAGE, notionList.length)} / {notionList.length}
+                        </TextCM>
+                      )}
+                    </View>
                   </View>
-                </View>
-              </>
-            )}
-            renderItem={params => (
-              <DraggableListItem
-                {...params}
-                onRefresh={() => setRefreshFlag(prev => prev + 1)}
-                refreshFlag={refreshFlag}
-              />
-            )}
-          />
+                </>
+              )}
+              renderItem={params => (
+                <DraggableListItem
+                  {...params}
+                  onRefresh={() => setRefreshFlag(prev => prev + 1)}
+                  refreshFlag={refreshFlag}
+                />
+              )}
+              ListFooterComponent={() => {
+                if (notionList.length <= ITEMS_PER_PAGE) {
+                  return null;
+                }
+                return (
+                  <View style={homeStyles.paginationContainer}>
+                    <PagingCM
+                      collectionSize={notionList.length}
+                      pageSize={ITEMS_PER_PAGE}
+                      currentPage={currentPage}
+                      onPageChange={(page) => {
+                        setCurrentPage(page);
+                      }}
+                    />
+                  </View>
+                );
+              }}
+            />
+          </>
         )}
       </View>
     );
@@ -378,6 +415,16 @@
       flex: 1,
       fontSize: 14,
       color: '#333',
+    },
+    sectionSubtitle: {
+      fontSize: 12,
+      color: '#999',
+      fontWeight: '400',
+    },
+    paginationContainer: {
+      paddingVertical: 20,
+      paddingHorizontal: 16,
+      alignItems: 'center',
     },
   });
 

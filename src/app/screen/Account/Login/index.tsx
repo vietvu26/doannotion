@@ -113,26 +113,48 @@ const LoginScreen = () => {
       console.log('=== Bắt đầu đăng nhập ===');
       console.log('Email:', email.trim());
 
-      // Lấy FCM token nếu có
+      // Lấy FCM token nếu có - với timeout và xử lý lỗi tốt hơn
       let fcmToken: string | undefined;
       try {
-        const hasPermission = await messaging().requestPermission();
-        console.log('=== FCM Permission Status ===');
-        console.log('Permission:', hasPermission);
+        // Kiểm tra xem messaging có available không
+        const messagingInstance = messaging();
+        
+        // Request permission với timeout
+        const permissionPromise = messagingInstance.requestPermission();
+        const permissionTimeout = new Promise<number>((resolve) => 
+          setTimeout(() => resolve(messaging.AuthorizationStatus.NOT_DETERMINED), 2000)
+        );
+        
+        const hasPermission = await Promise.race([permissionPromise, permissionTimeout]);
         
         if (hasPermission === messaging.AuthorizationStatus.AUTHORIZED || 
             hasPermission === messaging.AuthorizationStatus.PROVISIONAL) {
-          fcmToken = await messaging().getToken();
-          console.log('=== FCM Token ===');
-          console.log('FCM Token:', fcmToken);
-          console.log('FCM Token Length:', fcmToken?.length);
+          // Lấy token với timeout
+          const tokenPromise = messagingInstance.getToken();
+          const tokenTimeout = new Promise<string | undefined>((resolve) => 
+            setTimeout(() => resolve(undefined), 3000)
+          );
+          
+          fcmToken = await Promise.race([tokenPromise, tokenTimeout]);
+          
+          if (fcmToken) {
+            console.log('=== FCM Token lấy thành công ===');
+          }
         } else {
           console.log('=== Không có quyền gửi notification ===');
-          console.log('Permission Status:', hasPermission);
         }
-      } catch (fcmError) {
-        console.error('=== Lỗi lấy FCM token ===');
-        console.error('Error:', fcmError);
+      } catch (fcmError: any) {
+        // Xử lý lỗi SERVICE_NOT_AVAILABLE một cách im lặng
+        const errorMessage = String(fcmError?.message || '');
+        const errorCode = String(fcmError?.code || '');
+        
+        // Chỉ log nếu không phải lỗi SERVICE_NOT_AVAILABLE
+        if (!errorCode.includes('messaging/unknown') && 
+            !errorMessage.includes('SERVICE_NOT_AVAILABLE') &&
+            !errorMessage.includes('SERVICE_NOT_AVAILABLE')) {
+          console.log('=== Không thể lấy FCM token ===');
+          console.log('Error code:', errorCode);
+        }
         // Không fail login nếu không lấy được FCM token
       }
 

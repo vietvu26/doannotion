@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import {
   Keyboard,
   TouchableWithoutFeedback,
@@ -11,8 +11,9 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import { Icon } from '@ui-kitten/components';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import axios from 'axios';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import HeaderCM from '../../../components/Header/HeaderCM';
 import UploadIcon from '../../../../assets/images/ic/upload.svg';
@@ -24,6 +25,8 @@ import ShareSettings from './ShareSettings';
 import TextCM from '../../../components/Text';
 import Color from '../../../../constants/Color';
 
+const DRAFT_STORAGE_KEY = '@editor_draft';
+
 const EditorScreen = () => {
   const navigation = useNavigation<any>();
   const currentUserId = useAppSelector((state) => state.common.currentUserId);
@@ -33,6 +36,83 @@ const EditorScreen = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [showShareSheet, setShowShareSheet] = useState(false);
   const [notionId, setNotionId] = useState<number | null>(null);
+  const [isInitialized, setIsInitialized] = useState(false);
+  
+  // Lưu draft vào AsyncStorage
+  const saveDraft = async () => {
+    try {
+      const currentContent = await (richTextRef.current?.getContent() || Promise.resolve(''));
+      const draft = {
+        title: title,
+        content: currentContent,
+        timestamp: Date.now(),
+      };
+      await AsyncStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    } catch (error) {
+      console.error('Lỗi lưu draft:', error);
+    }
+  };
+
+  // Load draft từ AsyncStorage
+  const loadDraft = async () => {
+    try {
+      const draftJson = await AsyncStorage.getItem(DRAFT_STORAGE_KEY);
+      if (draftJson) {
+        const draft = JSON.parse(draftJson);
+        // Chỉ load draft nếu chưa có dữ liệu trong editor
+        if (!isInitialized && !title.trim()) {
+          setTitle(draft.title || '');
+          if (draft.content) {
+            setTimeout(() => {
+              richTextRef.current?.setContent(draft.content || '');
+            }, 200);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Lỗi load draft:', error);
+    }
+  };
+
+  // Xóa draft sau khi lưu thành công
+  const clearDraft = async () => {
+    try {
+      await AsyncStorage.removeItem(DRAFT_STORAGE_KEY);
+    } catch (error) {
+      console.error('Lỗi xóa draft:', error);
+    }
+  };
+
+  // Lưu draft khi navigate away
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('blur', () => {
+      saveDraft();
+    });
+
+    return unsubscribe;
+  }, [navigation, title]);
+
+  // Load draft khi quay lại màn hình
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!isInitialized) {
+        loadDraft().then(() => {
+          setIsInitialized(true);
+        });
+      }
+    }, [isInitialized])
+  );
+
+  // Lưu draft định kỳ khi có thay đổi title
+  useEffect(() => {
+    if (isInitialized) {
+      const timer = setTimeout(() => {
+        saveDraft();
+      }, 2000); // Lưu sau 2 giây không có thay đổi
+
+      return () => clearTimeout(timer);
+    }
+  }, [title, isInitialized]);
   
   // Hàm để dismiss keyboard và blur editor
   const handleDismissKeyboard = () => {
@@ -45,22 +125,26 @@ const EditorScreen = () => {
   const saveNotion = async () => {
     if (isSaving) return; // Tránh lưu nhiều lần
     
-    // Kiểm tra nếu không có nội dung thì chỉ quay về không lưu
-    const content = richTextRef.current?.getContent() || '';
-    const titleValue = title.trim();
-    
-    // Nếu cả title và content đều rỗng, chỉ quay về
-    if (titleValue === '' && content === '') {
-      console.log('Editor trống, không lưu gì');
-      setTitle('');
-      richTextRef.current?.setContent('');
-      navigation.goBack();
-      return;
-    }
-    
     setIsSaving(true);
     
     try {
+      // Lấy content từ RichEditor (luôn là Promise)
+      const content = await (richTextRef.current?.getContent() || Promise.resolve(''));
+      const finalContent = content || '';
+      const titleValue = title.trim();
+      
+      // Nếu cả title và content đều rỗng, chỉ quay về
+      if (titleValue === '' && finalContent === '') {
+        console.log('Editor trống, không lưu gì');
+        await clearDraft();
+        setIsSaving(false);
+        setTitle('');
+        richTextRef.current?.setContent('');
+        setIsInitialized(false);
+        navigation.goBack();
+        return;
+      }
+      
       if (!currentUserId) {
         Alert.alert('Lỗi', 'Chưa đăng nhập. Vui lòng đăng nhập để lưu ghi chú.');
         setIsSaving(false);
@@ -71,7 +155,7 @@ const EditorScreen = () => {
       
       const response = await axios.post(`${getApiUrl()}/api/add-notion`, {
         title: finalTitle,
-        content: content,
+        content: finalContent,
         authorId: currentUserId,
         icon: 'file-text-outline',
       });
@@ -83,11 +167,14 @@ const EditorScreen = () => {
         setNotionId(response.data.id);
       }
       
-      // Xóa thông tin trong editor sau khi lưu thành công
+      // Xóa draft và thông tin trong editor sau khi lưu thành công
+      await clearDraft();
       setTitle('');
       richTextRef.current?.setContent('');
+      setIsInitialized(false);
       
       // Quay lại màn hình trước sau khi lưu thành công
+      setIsSaving(false);
       navigation.goBack();
     } catch (error) {
       console.error('Lỗi khi lưu ghi chú:', error);
@@ -108,7 +195,9 @@ const EditorScreen = () => {
       return;
     }
 
-    const content = richTextRef.current?.getContent() || '';
+    // Lấy content từ RichEditor (luôn là Promise)
+    const content = await (richTextRef.current?.getContent() || Promise.resolve(''));
+    const finalContent = content || '';
     const titleValue = title.trim();
     const finalTitle = titleValue === '' ? 'Không có tiêu đề' : titleValue;
 
@@ -123,7 +212,7 @@ const EditorScreen = () => {
       setIsSaving(true);
       const response = await axios.post(`${getApiUrl()}/api/add-notion`, {
         title: finalTitle,
-        content: content,
+        content: finalContent,
         authorId: currentUserId,
         icon: 'file-text-outline',
       });
@@ -161,12 +250,7 @@ const EditorScreen = () => {
                 <TouchableOpacity onPress={handleOpenShareSheet} disabled={isSaving}>
                   <UploadIcon width={24} height={24} fill="#FFFFFF" />
                 </TouchableOpacity>
-                <Icon
-                  name="more-horizontal-outline"
-                  width={24}
-                  height={24}
-                  fill="white"
-                />
+                
               </View>
             )}
           />
@@ -181,10 +265,11 @@ const EditorScreen = () => {
         <View style={{ flex: 1, backgroundColor: '#fff' }}>
           <ScrollView 
             style={{ flex: 1, backgroundColor: '#fff' }}
-            contentContainerStyle={{ flexGrow: 1, backgroundColor: '#fff' }}
+            contentContainerStyle={{ paddingBottom: 100 }}
             keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
           >
-            <View style={{ flex: 1, padding: 24, backgroundColor: '#fff' }}>
+            <View style={{ padding: 24, backgroundColor: '#fff' }}>
               {/* Title input */}
               <TextInput
                 ref={titleRef}
@@ -199,11 +284,21 @@ const EditorScreen = () => {
                 }}
               />
 
-              <InputRichText 
-                ref={richTextRef}
-                containerStyle={{ flex: 1 }}
-                editorStyle={{ flex: 1 }}
-              />
+              <View style={{ minHeight: 400 }}>
+                <InputRichText 
+                  ref={richTextRef}
+                  containerStyle={{ flex: 1 }}
+                  editorStyle={{ flex: 1 }}
+                  onChange={() => {
+                    // Lưu draft khi content thay đổi (debounced)
+                    if (isInitialized) {
+                      setTimeout(() => {
+                        saveDraft();
+                      }, 2000);
+                    }
+                  }}
+                />
+              </View>
             </View>
           </ScrollView>
         </View>

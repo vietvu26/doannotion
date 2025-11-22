@@ -92,7 +92,12 @@ const DashboardApp = () => {
             Quản lý chung
           </TextCM>
           <View style={{ flexDirection: 'row', marginTop: 20, gap: 16 }}>
-            <Pressable style={styles.iconITask}>
+            <Pressable 
+              style={styles.iconITask}
+              onPress={() => {
+                navigation.navigate(NavigationName.ETaskHome);
+              }}
+            >
               <ITask height={20} width={20} />
             </Pressable>
             <Pressable

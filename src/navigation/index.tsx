@@ -16,6 +16,10 @@ import ResetPasswordScreen from '../app/screen/Account/ResetPassword';
 import SettingsScreen from '../app/screen/Settings';
 import AccountInfoScreen from '../app/screen/AccountInfo';
 import DetailScreen from '../app/screen/Notion/Detail';
+import BottomTabNavigationETask from './BottomTabs/BottomTabNavigationETask';
+import ETaskDetail from '../app/screen/Itask/TaskDetail';
+import TaskDetailScreen from '../app/screen/Itask/TaskDetail/TaskDetailScreen';
+import TaskListScreen from '../app/screen/Itask/TaskDetail/TaskListScreen';
 import { useAppSelector } from '../hooks/useRedux';
 
 const Stack = createNativeStackNavigator();
@@ -81,6 +85,22 @@ export default function RootNavigator() {
         <Stack.Screen
           name={NavigationName.NotionDetail}
           component={DetailScreen}
+        />
+        <Stack.Screen
+          name={NavigationName.ETaskHome}
+          component={BottomTabNavigationETask}
+        />
+        <Stack.Screen
+          name={NavigationName.ETaskDetail}
+          component={ETaskDetail}
+        />
+        <Stack.Screen
+          name={NavigationName.TaskDetailScreen}
+          component={TaskDetailScreen}
+        />
+        <Stack.Screen
+          name={NavigationName.TaskListScreen}
+          component={TaskListScreen}
         />
       </Stack.Navigator>
       <Toast config={toastConfig} />

@@ -21,7 +21,13 @@ const NavigationName = {
   CreatePassword: 'CreatePassword',
   ResetPassword: 'ResetPassword',
   Settings: 'Settings',
-  AccountInfo: 'AccountInfo'
+  AccountInfo: 'AccountInfo',
+  ETaskHome: 'ETaskHome',
+  ETaskDetail: 'ETaskDetail',
+  ETaskStatistics: 'ETaskStatistics',
+  ETaskNotification: 'ETaskNotification',
+  TaskDetailScreen: 'TaskDetailScreen',
+  TaskListScreen: 'TaskListScreen',
 };
 
 export default NavigationName;

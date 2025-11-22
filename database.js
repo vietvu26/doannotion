@@ -78,12 +78,262 @@ var con = mysql.createConnection({
   database: "notion_db"
 });
 
+// ============================================
+// REMINDER SYSTEM - Sử dụng setTimeout thay vì polling
+// ============================================
+// Map để lưu các setTimeout timers: { reminderId: timeoutId }
+var reminderTimers = new Map();
+
+// Function: Gửi FCM notification và lưu vào database
+function sendNotificationToUser(userId, title, body, type, taskId, taskName, workspaceId, workspaceName, deepLink, callback) {
+  // Lấy FCM token và email của user
+  const getUserSql = "SELECT id, email, fcm_token FROM user WHERE id = ?";
+  con.query(getUserSql, [userId], function(err, userResults) {
+    if (err) {
+      console.error(`[Notification] Error getting user ${userId}:`, err);
+      if (callback) callback(err, null);
+      return;
+    }
+
+    if (userResults.length === 0) {
+      console.error(`[Notification] User ${userId} not found`);
+      if (callback) callback(new Error('User not found'), null);
+      return;
+    }
+
+    const user = userResults[0];
+    const fcmToken = user.fcm_token;
+
+    // Lưu notification vào database
+    const insertNotificationSql = `
+      INSERT INTO notification (task_id, task_name, workspace_id, workspace_name, type, message, user_id, is_read)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+    `;
+    const notificationMessage = body || title;
+    
+    con.query(insertNotificationSql, [
+      taskId || null,
+      taskName || null,
+      workspaceId || null,
+      workspaceName || null,
+      type,
+      notificationMessage,
+      userId
+    ], function(notifErr, notifResult) {
+      if (notifErr) {
+        console.error(`[Notification] Error saving notification for user ${userId}:`, notifErr);
+      } else {
+        console.log(`[Notification] Saved notification for user ${userId}, type: ${type}`);
+      }
+
+      // Gửi FCM notification nếu có token
+      if (fcmToken && firebaseInitialized) {
+        const message = {
+          notification: {
+            title: title,
+            body: body || notificationMessage
+          },
+          data: {
+            type: type,
+            title: title,
+            body: body || notificationMessage,
+            deepLink: deepLink || 'mobilenote://home',
+            taskId: taskId ? taskId.toString() : '',
+            workspaceId: workspaceId ? workspaceId.toString() : ''
+          },
+          token: fcmToken,
+          android: {
+            priority: 'high',
+          },
+          apns: {
+            payload: {
+              aps: {
+                sound: 'default',
+                badge: 1,
+                'content-available': 1,
+              },
+            },
+          },
+        };
+
+        admin.messaging().send(message)
+          .then((response) => {
+            console.log(`[Notification] FCM sent successfully to user ${userId}:`, response);
+            if (callback) callback(null, { notificationId: notifResult ? notifResult.insertId : null, fcmSent: true });
+          })
+          .catch((error) => {
+            console.error(`[Notification] Error sending FCM to user ${userId}:`, error);
+            if (callback) callback(error, { notificationId: notifResult ? notifResult.insertId : null, fcmSent: false });
+          });
+      } else {
+        if (!fcmToken) {
+          console.log(`[Notification] User ${userId} has no FCM token, skipping FCM send`);
+        }
+        if (callback) callback(null, { notificationId: notifResult ? notifResult.insertId : null, fcmSent: false });
+      }
+    });
+  });
+}
+
+// Function: Gửi reminder notification
+function sendReminderNotification(reminderId, taskId, fcmToken, taskName) {
+  if (!firebaseInitialized) {
+    console.error('[Reminder] Firebase chưa được khởi tạo, không thể gửi reminder');
+    return;
+  }
+
+  const deepLink = `mobilenote://task/${taskId}`;
+  const message = {
+    notification: {
+      title: 'Nhắc nhở nhiệm vụ',
+      body: 'Bạn có 1 nhiệm vụ cần hoàn thành'
+    },
+    data: {
+      taskId: taskId.toString(),
+      type: 'reminder',
+      title: 'Nhắc nhở nhiệm vụ',
+      body: 'Bạn có 1 nhiệm vụ cần hoàn thành',
+      deepLink: deepLink
+    },
+    token: fcmToken,
+    android: {
+      priority: 'high',
+    },
+    apns: {
+      payload: {
+        aps: {
+          sound: 'default',
+          badge: 1,
+          'content-available': 1,
+        },
+      },
+    },
+  };
+
+  admin.messaging().send(message)
+    .then(function(response) {
+      console.log(`[Reminder] Successfully sent notification for task ${taskId}`);
+      // Cập nhật status thành 'sent'
+      const updateStatusSql = "UPDATE task_reminder SET status = 'sent', updatedAt = NOW() WHERE id = ?";
+      con.query(updateStatusSql, [reminderId], function(updateErr) {
+        if (updateErr) {
+          console.error('[Reminder] Error updating reminder status: ' + updateErr.stack);
+        }
+      });
+      // Xóa timer khỏi map
+      reminderTimers.delete(reminderId);
+    })
+    .catch(function(error) {
+      console.error(`[Reminder] Error sending notification for task ${taskId}:`, error.message);
+      // Cập nhật status thành 'failed'
+      const updateStatusSql = "UPDATE task_reminder SET status = 'failed', updatedAt = NOW() WHERE id = ?";
+      con.query(updateStatusSql, [reminderId], function(updateErr) {
+        if (updateErr) {
+          console.error('[Reminder] Error updating reminder status: ' + updateErr.stack);
+        }
+      });
+      // Xóa timer khỏi map
+      reminderTimers.delete(reminderId);
+    });
+}
+
+// Function: Hủy reminder đã schedule
+function cancelReminder(reminderId) {
+  const timeoutId = reminderTimers.get(reminderId);
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+    reminderTimers.delete(reminderId);
+    console.log(`[Reminder] Cancelled reminder ${reminderId}`);
+  }
+}
+
+// Function: Schedule reminder với setTimeout
+function scheduleReminder(reminderId, taskId, reminderDate, fcmToken, taskName) {
+  // Hủy reminder cũ nếu có
+  cancelReminder(reminderId);
+
+  const reminderDateTime = new Date(reminderDate);
+  const now = new Date();
+  const delay = reminderDateTime.getTime() - now.getTime();
+
+  // Nếu thời gian đã qua, gửi ngay
+  if (delay <= 0) {
+    console.log(`[Reminder] Reminder ${reminderId} is due, sending immediately`);
+    sendReminderNotification(reminderId, taskId, fcmToken, taskName);
+    return;
+  }
+
+  // Schedule setTimeout
+  const timeoutId = setTimeout(function() {
+    sendReminderNotification(reminderId, taskId, fcmToken, taskName);
+  }, delay);
+
+  reminderTimers.set(reminderId, timeoutId);
+  console.log(`[Reminder] Scheduled reminder ${reminderId} for task ${taskId} in ${Math.round(delay / 1000)} seconds`);
+}
+
+// Function: Load và schedule lại tất cả reminder pending khi server khởi động
+function loadAndSchedulePendingReminders() {
+  if (!firebaseInitialized) {
+    console.log('[Reminder] Firebase chưa được khởi tạo, sẽ load reminders sau');
+    return;
+  }
+
+  const getPendingRemindersSql = `
+    SELECT id, task_id, user_id, reminder_date, task_name, fcm_token
+    FROM task_reminder
+    WHERE status = 'pending'
+    AND reminder_date > NOW()
+    ORDER BY reminder_date ASC
+  `;
+
+  con.query(getPendingRemindersSql, function(err, reminders) {
+    if (err) {
+      console.error('[Reminder] Error loading pending reminders: ' + err.stack);
+      return;
+    }
+
+    if (reminders.length === 0) {
+      console.log('[Reminder] No pending reminders found');
+      return;
+    }
+
+    console.log(`[Reminder] Loading ${reminders.length} pending reminder(s)`);
+
+    reminders.forEach(function(reminder) {
+      if (reminder.fcm_token) {
+        scheduleReminder(
+          reminder.id,
+          reminder.task_id,
+          reminder.reminder_date,
+          reminder.fcm_token,
+          reminder.task_name
+        );
+      } else {
+        // Nếu không có FCM token, đánh dấu là failed
+        const updateStatusSql = "UPDATE task_reminder SET status = 'failed', updatedAt = NOW() WHERE id = ?";
+        con.query(updateStatusSql, [reminder.id], function(updateErr) {
+          if (updateErr) {
+            console.error('[Reminder] Error updating reminder status: ' + updateErr.stack);
+          }
+        });
+      }
+    });
+  });
+}
+
 con.connect(function(err) {
   if (err) {
     console.error('Database connection failed: ' + err.stack);
     return;
   }
   console.log('Connected to database with ID: ' + con.threadId);
+  
+  // Load và schedule lại các reminder pending sau khi database kết nối
+  // Đợi 2 giây để đảm bảo Firebase đã khởi tạo
+  setTimeout(function() {
+    loadAndSchedulePendingReminders();
+  }, 2000);
 });
 
 // API: Test gửi FCM notification
@@ -221,6 +471,37 @@ app.get('/user', function (req, res) {
       return;
     }
     res.send(results);
+  });
+});
+
+// API: Lấy danh sách user (cho chức năng giao cho)
+app.get('/api/user', function (req, res) {
+  const { search } = req.query;
+  let sql = "SELECT id, name, email, phone, avatar FROM user WHERE 1=1";
+  const params = [];
+  
+  if (search) {
+    sql += " AND (name LIKE ? OR email LIKE ?)";
+    const searchPattern = `%${search}%`;
+    params.push(searchPattern, searchPattern);
+  }
+  
+  sql += " ORDER BY name ASC";
+  
+  con.query(sql, params, function(err, results) {
+    if (err) {
+      console.error('Error fetching users: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi lấy danh sách user: ' + err.message
+      });
+    }
+    
+    res.json({
+      success: true,
+      users: results,
+      count: results.length
+    });
   });
 });
 
@@ -1682,13 +1963,11 @@ app.post('/api/invite-users', function (req, res) {
             <p>Xin chào,</p>
             <p><strong>${inviterDisplayName}</strong> đã mời bạn xem trang <strong>"${notionDisplayTitle}"</strong> với quyền <strong>${permissionText}</strong>.</p>
             <div style="background-color: #f5f5f5; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
-              <p style="margin: 10px 0;">Nhấn vào nút bên dưới để mở trang:</p>
-              <a href="${deepLink}" style="display: inline-block; background-color: #7C3AED; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 10px 0;">
-                Mở trang
+              <p style="margin: 10px 0;">Nhấn vào nút bên dưới để tải ứng dụng:</p>
+              <a href="https://drive.google.com/file/d/1YQJMzTVjMqhQ-6cW6PYXDGygw6ExkhJR/view" style="display: inline-block; background-color: #7C3AED; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 10px 0;">
+                Tải ứng dụng
               </a>
             </div>
-            <p>Hoặc sao chép và dán liên kết sau vào trình duyệt hoặc ứng dụng:</p>
-            <p style="background-color: #f5f5f5; padding: 10px; border-radius: 4px; word-break: break-all; font-family: monospace;">${deepLink}</p>
             <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
             <p style="color: #999; font-size: 12px;">Đây là email tự động, vui lòng không trả lời.</p>
           </div>
@@ -2423,6 +2702,1775 @@ app.delete('/api/notion-comments/:commentId', function (req, res) {
       res.status(200).json({
         success: true,
         message: 'Đã xóa comment thành công'
+      });
+    });
+  });
+});
+
+// API: Lấy thống kê task
+app.get('/api/task/statistics', function (req, res) {
+  const { user_id } = req.query;
+  
+  console.log('[Statistics API] Request received, user_id:', user_id);
+  
+  if (!user_id) {
+    console.error('[Statistics API] user_id is missing');
+    return res.status(400).json({
+      success: false,
+      error: 'user_id là bắt buộc'
+    });
+  }
+  
+  // Lấy thống kê từ bảng task
+  const sql = `
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as inProgress,
+      SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN due_date < NOW() AND status != 'completed' AND due_date IS NOT NULL THEN 1 ELSE 0 END) as overdue
+    FROM task
+    WHERE created_by = ?
+  `;
+  
+  console.log('[Statistics API] Executing SQL:', sql);
+  console.log('[Statistics API] With params:', [user_id]);
+  
+  con.query(sql, [user_id], function(err, results) {
+    if (err) {
+      console.error('[Statistics API] Error fetching task statistics: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi lấy thống kê task: ' + err.message
+      });
+    }
+    
+    console.log('[Statistics API] Query results:', JSON.stringify(results, null, 2));
+    
+    if (results.length === 0) {
+      console.log('[Statistics API] No results found, returning zeros');
+      return res.json({
+        success: true,
+        statistics: {
+          total: 0,
+          completed: 0,
+          inProgress: 0,
+          pending: 0,
+          overdue: 0
+        }
+      });
+    }
+    
+    const stats = results[0];
+    console.log('[Statistics API] Raw stats:', stats);
+    
+    const statistics = {
+      total: parseInt(stats.total) || 0,
+      completed: parseInt(stats.completed) || 0,
+      inProgress: parseInt(stats.inProgress) || 0,
+      pending: parseInt(stats.pending) || 0,
+      overdue: parseInt(stats.overdue) || 0
+    };
+    
+    console.log('[Statistics API] Final statistics:', statistics);
+    
+    res.json({
+      success: true,
+      statistics: statistics
+    });
+  });
+});
+
+// API: Lấy danh sách task
+app.get('/api/task', function (req, res) {
+  const { created_by, status, workspace_id } = req.query;
+  
+  // Nếu không có workspace_id và không có created_by, trả về lỗi
+  if (!workspace_id && !created_by) {
+    return res.status(400).json({
+      success: false,
+      error: 'created_by hoặc workspace_id là bắt buộc'
+    });
+  }
+  
+  let sql = "";
+  const params = [];
+  
+  // Nếu có workspace_id, lấy tất cả task của workspace đó (không chỉ của created_by)
+  // Tất cả người được phân quyền trong workspace đều thấy được
+  if (workspace_id) {
+    sql = "SELECT * FROM task WHERE workspace_id = ?";
+    params.push(workspace_id);
+    
+    if (status) {
+      sql += " AND status = ?";
+      params.push(status);
+    }
+  } else {
+    // Nếu không có workspace_id, lấy task theo created_by (logic cũ)
+    sql = "SELECT * FROM task WHERE created_by = ?";
+    params.push(created_by);
+    
+    if (status) {
+      sql += " AND status = ?";
+      params.push(status);
+    }
+  }
+  
+  sql += " ORDER BY createdAt DESC";
+  
+  console.log('Fetching tasks with SQL:', sql);
+  console.log('Params:', params);
+  
+  con.query(sql, params, function(err, results) {
+    if (err) {
+      console.error('Error fetching tasks: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi lấy danh sách task: ' + err.message
+      });
+    }
+    
+    console.log('Tasks found:', results.length);
+    
+    res.json({
+      success: true,
+      tasks: results,
+      count: results.length
+    });
+  });
+});
+
+// API: Lên lịch nhắc nhở task với Firebase
+app.post('/api/task/:id/schedule-reminder', function (req, res) {
+  const taskId = req.params.id;
+  const { taskName, reminderDate } = req.body;
+
+  if (!taskId || !reminderDate) {
+    return res.status(400).json({
+      success: false,
+      error: 'taskId và reminderDate là bắt buộc'
+    });
+  }
+
+  // Lấy thông tin user để gửi notification
+  const getTaskSql = "SELECT created_by FROM task WHERE id = ?";
+  con.query(getTaskSql, [taskId], function(err, taskResults) {
+    if (err || taskResults.length === 0) {
+      return res.status(500).json({
+        success: false,
+        error: 'Không tìm thấy task'
+      });
+    }
+
+    const userId = taskResults[0].created_by;
+
+    // Lấy FCM token của user
+    const getTokenSql = "SELECT fcm_token FROM user WHERE id = ?";
+    con.query(getTokenSql, [userId], function(tokenErr, tokenResults) {
+      if (tokenErr) {
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi lấy FCM token'
+        });
+      }
+
+      if (tokenResults.length === 0 || !tokenResults[0].fcm_token) {
+        return res.json({
+          success: true,
+          message: 'User chưa có FCM token, sẽ gửi notification sau khi user đăng nhập',
+        });
+      }
+
+      const fcmToken = tokenResults[0].fcm_token;
+      const reminderDateTime = new Date(reminderDate);
+      const now = new Date();
+
+      if (reminderDateTime <= now) {
+        return res.status(400).json({
+          success: false,
+          error: 'Thời gian nhắc nhở phải trong tương lai'
+        });
+      }
+
+      // Lưu thông tin reminder vào bảng task_reminder
+      const insertReminderSql = `
+        INSERT INTO task_reminder (task_id, user_id, reminder_date, task_name, fcm_token, status, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, 'pending', NOW(), NOW())
+        ON DUPLICATE KEY UPDATE
+          reminder_date = ?,
+          task_name = ?,
+          fcm_token = ?,
+          status = 'pending',
+          updatedAt = NOW()
+      `;
+
+      con.query(
+        insertReminderSql,
+        [taskId, userId, reminderDate, taskName, fcmToken, reminderDate, taskName, fcmToken],
+        function(insertErr, insertResult) {
+          if (insertErr) {
+            console.error('Error inserting reminder: ' + insertErr.stack);
+            return res.status(500).json({
+              success: false,
+              error: 'Lỗi lưu reminder: ' + insertErr.message
+            });
+          }
+
+          // Lấy reminder ID
+          // Nếu là INSERT, insertResult.insertId sẽ có giá trị
+          // Nếu là UPDATE (ON DUPLICATE KEY), cần query lại để lấy ID
+          let reminderId = insertResult.insertId;
+          
+          if (!reminderId || reminderId === 0) {
+            // Nếu là UPDATE, query lại để lấy ID
+            const getReminderIdSql = "SELECT id FROM task_reminder WHERE task_id = ? AND user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1";
+            con.query(getReminderIdSql, [taskId, userId], function(getIdErr, getIdResults) {
+              if (!getIdErr && getIdResults.length > 0) {
+                const actualReminderId = getIdResults[0].id;
+                // Schedule reminder
+                scheduleReminder(actualReminderId, taskId, reminderDate, fcmToken, taskName);
+              }
+            });
+          } else {
+            // Nếu là INSERT, schedule reminder ngay
+            scheduleReminder(reminderId, taskId, reminderDate, fcmToken, taskName);
+          }
+
+          res.json({
+            success: true,
+            message: 'Đã lên lịch nhắc nhở thành công',
+            reminderId: reminderId || insertResult.insertId || 'updated'
+          });
+        }
+      );
+    });
+  });
+});
+
+// API: Lấy task theo ID
+app.get('/api/task/:id', function (req, res) {
+  const taskId = req.params.id;
+  
+  if (!taskId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID task là bắt buộc'
+    });
+  }
+  
+  const sql = "SELECT * FROM task WHERE id = ?";
+  
+  con.query(sql, [taskId], function(err, results) {
+    if (err) {
+      console.error('Error fetching task: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi lấy thông tin task: ' + err.message
+      });
+    }
+    
+    if (results.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Task không tồn tại'
+      });
+    }
+    
+    res.json({
+      success: true,
+      task: results[0]
+    });
+  });
+});
+
+// API: Tạo task mới
+app.post('/api/task', function (req, res) {
+  const { name, description, status, priority, start_date, due_date, completed_date, created_by, workspace_id } = req.body;
+
+  if (!name || !created_by) {
+    return res.status(400).json({
+      success: false,
+      error: 'Tên task và created_by là bắt buộc'
+    });
+  }
+
+  // Kiểm tra user có tồn tại không
+  const checkUserSql = "SELECT id FROM user WHERE id = ?";
+  con.query(checkUserSql, [created_by], function(err, userResults) {
+    if (err) {
+      console.error('Error checking user: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra user'
+      });
+    }
+
+    if (userResults.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'User không tồn tại'
+      });
+    }
+
+    // Kiểm tra workspace có tồn tại không (nếu có workspace_id)
+    if (workspace_id) {
+      const checkWorkspaceSql = "SELECT id FROM workspace WHERE id = ?";
+      con.query(checkWorkspaceSql, [workspace_id], function(workspaceErr, workspaceResults) {
+        if (workspaceErr) {
+          console.error('Error checking workspace: ' + workspaceErr.stack);
+          return res.status(500).json({
+            success: false,
+            error: 'Lỗi kiểm tra workspace'
+          });
+        }
+
+        if (workspaceResults.length === 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Workspace không tồn tại'
+          });
+        }
+
+        // Insert task vào database với workspace_id
+        insertTask();
+      });
+    } else {
+      // Insert task vào database không có workspace_id
+      insertTask();
+    }
+
+    function insertTask() {
+      const insertSql = `
+        INSERT INTO task (name, description, status, priority, start_date, due_date, completed_date, created_by, workspace_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+
+      const values = [
+        name.trim(),
+        description || null,
+        status || 'new',
+        priority || null,
+        start_date || null,
+        due_date || null,
+        completed_date || null,
+        created_by,
+        workspace_id || null
+      ];
+
+    con.query(insertSql, values, function(insertErr, result) {
+      if (insertErr) {
+        console.error('Error inserting task: ' + insertErr.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi tạo task: ' + insertErr.message
+        });
+      }
+
+      // Lấy task vừa tạo
+      const getTaskSql = "SELECT * FROM task WHERE id = ?";
+      con.query(getTaskSql, [result.insertId], function(getErr, taskResults) {
+        if (getErr) {
+          console.error('Error getting task: ' + getErr.stack);
+          return res.status(500).json({
+            success: false,
+            error: 'Lỗi lấy thông tin task vừa tạo'
+          });
+        }
+
+        // Tạo notification cho user khi tạo task mới
+        const insertNotificationSql = `
+          INSERT INTO notification (task_id, task_name, type, message, user_id, is_read)
+          VALUES (?, ?, 'task_created', ?, ?, 0)
+        `;
+        const notificationMessage = `Bạn đã tạo nhiệm vụ mới: "${name.trim()}"`;
+        
+        con.query(insertNotificationSql, [result.insertId, name.trim(), notificationMessage, created_by], function(notifErr) {
+          if (notifErr) {
+            console.error('Error creating notification: ' + notifErr.stack);
+          } else {
+            console.log(`[Notification] Created notification for task ${result.insertId}`);
+          }
+        });
+
+        res.status(201).json({
+          success: true,
+          message: 'Tạo task thành công',
+          task: taskResults[0],
+          id: result.insertId
+        });
+      });
+    });
+    }
+  });
+});
+
+// API: Tạo workspace mới
+app.post('/api/workspace', function (req, res) {
+  const { name, description, startAt, dueAt, created_by } = req.body;
+
+  if (!name || !created_by) {
+    return res.status(400).json({
+      success: false,
+      error: 'Tên workspace và created_by là bắt buộc'
+    });
+  }
+
+  // Kiểm tra user có tồn tại không
+  const checkUserSql = "SELECT id FROM user WHERE id = ?";
+  con.query(checkUserSql, [created_by], function(err, userResults) {
+    if (err) {
+      console.error('Error checking user: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra user'
+      });
+    }
+
+    if (userResults.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'User không tồn tại'
+      });
+    }
+
+    // Insert workspace vào database
+    // Bảng workspace có: id, name, description, created_by, createdAt, updatedAt, dueAt, startAt
+    const insertSql = `
+      INSERT INTO workspace (name, description, startAt, dueAt, created_by)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+
+    const values = [
+      name.trim(),
+      description || null,
+      startAt || null,
+      dueAt || null,
+      created_by
+    ];
+
+    con.query(insertSql, values, function(insertErr, result) {
+      if (insertErr) {
+        console.error('Error inserting workspace: ' + insertErr.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi tạo workspace: ' + insertErr.message
+        });
+      }
+
+      // Lấy workspace vừa tạo
+      const getWorkspaceSql = "SELECT * FROM workspace WHERE id = ?";
+      con.query(getWorkspaceSql, [result.insertId], function(getErr, workspaceResults) {
+        if (getErr) {
+          console.error('Error getting workspace: ' + getErr.stack);
+          return res.status(500).json({
+            success: false,
+            error: 'Lỗi lấy thông tin workspace vừa tạo'
+          });
+        }
+
+        // Tạo notification cho user khi tạo workspace mới
+        const insertNotificationSql = `
+          INSERT INTO notification (workspace_id, workspace_name, type, message, user_id, is_read)
+          VALUES (?, ?, 'workspace_created', ?, ?, 0)
+        `;
+        const notificationMessage = `Bạn đã tạo không gian làm việc mới: "${name.trim()}"`;
+        
+        con.query(insertNotificationSql, [result.insertId, name.trim(), notificationMessage, created_by], function(notifErr) {
+          if (notifErr) {
+            console.error('Error creating notification: ' + notifErr.stack);
+          } else {
+            console.log(`[Notification] Created notification for workspace ${result.insertId}`);
+          }
+        });
+
+        res.status(201).json({
+          success: true,
+          message: 'Tạo workspace thành công',
+          workspace: workspaceResults[0],
+          id: result.insertId
+        });
+      });
+    });
+  });
+});
+
+// API: Lấy danh sách workspace
+app.get('/api/workspace', function (req, res) {
+  const { created_by, user_id, role } = req.query;
+
+  // Nếu có user_id và role='member', lấy workspace mà user có role là member
+  if (user_id && role === 'member') {
+    const sql = `
+      SELECT DISTINCT w.*
+      FROM workspace w
+      INNER JOIN workspace_user wu ON w.id = wu.workspace_id
+      WHERE wu.user_id = ? AND wu.role = 'member'
+      ORDER BY w.createdAt DESC
+    `;
+    
+    con.query(sql, [user_id], function(err, results) {
+      if (err) {
+        console.error('Error fetching shared workspaces: ' + err.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi lấy danh sách workspace được phân quyền: ' + err.message
+        });
+      }
+
+      res.json({
+        success: true,
+        workspaces: results,
+        count: results.length
+      });
+    });
+    return;
+  }
+
+  // Logic cũ: lấy workspace theo created_by
+  let sql = "SELECT * FROM workspace";
+  const params = [];
+
+  if (created_by) {
+    sql += " WHERE created_by = ?";
+    params.push(created_by);
+  }
+
+  sql += " ORDER BY createdAt DESC";
+
+  con.query(sql, params, function(err, results) {
+    if (err) {
+      console.error('Error fetching workspaces: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi lấy danh sách workspace: ' + err.message
+      });
+    }
+
+    res.json({
+      success: true,
+      workspaces: results,
+      count: results.length
+    });
+  });
+});
+
+// API: Cập nhật workspace
+app.put('/api/workspace/:id', function (req, res) {
+  const workspaceId = req.params.id;
+  const { name, description, startAt, dueAt } = req.body;
+
+  if (!workspaceId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID workspace là bắt buộc'
+    });
+  }
+
+  // Kiểm tra workspace có tồn tại không
+  const checkWorkspaceSql = "SELECT id FROM workspace WHERE id = ?";
+  con.query(checkWorkspaceSql, [workspaceId], function(err, workspaceResults) {
+    if (err) {
+      console.error('Error checking workspace: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra workspace'
+      });
+    }
+
+    if (workspaceResults.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Workspace không tồn tại'
+      });
+    }
+
+    // Cập nhật workspace
+    const updateSql = `
+      UPDATE workspace 
+      SET name = ?, description = ?, startAt = ?, dueAt = ?, updatedAt = NOW()
+      WHERE id = ?
+    `;
+
+    const values = [
+      name || null,
+      description || null,
+      startAt || null,
+      dueAt || null,
+      workspaceId
+    ];
+
+    con.query(updateSql, values, function(updateErr, result) {
+      if (updateErr) {
+        console.error('Error updating workspace: ' + updateErr.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi cập nhật workspace: ' + updateErr.message
+        });
+      }
+
+      // Lấy workspace đã cập nhật
+      const getWorkspaceSql = "SELECT * FROM workspace WHERE id = ?";
+      con.query(getWorkspaceSql, [workspaceId], function(getErr, workspaceResults) {
+        if (getErr) {
+          console.error('Error getting workspace: ' + getErr.stack);
+          return res.status(500).json({
+            success: false,
+            error: 'Lỗi lấy thông tin workspace đã cập nhật'
+          });
+        }
+
+        const updatedWorkspace = workspaceResults[0];
+        
+        // Tạo notification cho user khi cập nhật workspace
+        const insertNotificationSql = `
+          INSERT INTO notification (workspace_id, workspace_name, type, message, user_id, is_read)
+          VALUES (?, ?, 'workspace_updated', ?, ?, 0)
+        `;
+        const notificationMessage = `Bạn đã cập nhật không gian làm việc: "${updatedWorkspace.name}"`;
+        
+        con.query(insertNotificationSql, [workspaceId, updatedWorkspace.name, notificationMessage, updatedWorkspace.created_by], function(notifErr) {
+          if (notifErr) {
+            console.error('Error creating notification: ' + notifErr.stack);
+          } else {
+            console.log(`[Notification] Created notification for updated workspace ${workspaceId}`);
+          }
+        });
+
+        res.json({
+          success: true,
+          message: 'Cập nhật workspace thành công',
+          workspace: updatedWorkspace
+        });
+      });
+    });
+  });
+});
+
+// API: Xóa workspace
+app.delete('/api/workspace/:id', function (req, res) {
+  const workspaceId = req.params.id;
+  const { user_id } = req.query; // Lấy user_id từ query để kiểm tra quyền
+
+  if (!workspaceId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID workspace là bắt buộc'
+    });
+  }
+
+  if (!user_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'user_id là bắt buộc để kiểm tra quyền'
+    });
+  }
+
+  // Kiểm tra workspace có tồn tại không và lấy thông tin để tạo notification
+  const checkWorkspaceSql = "SELECT id, name, created_by FROM workspace WHERE id = ?";
+  con.query(checkWorkspaceSql, [workspaceId], function(err, workspaceResults) {
+    if (err) {
+      console.error('Error checking workspace: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra workspace'
+      });
+    }
+
+    if (workspaceResults.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Workspace không tồn tại'
+      });
+    }
+
+    const workspace = workspaceResults[0];
+    const workspaceName = workspace.name;
+    const ownerId = workspace.created_by;
+
+    // Kiểm tra quyền: chỉ owner (created_by) mới được xóa workspace
+    if (parseInt(user_id) !== parseInt(ownerId)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Bạn không có quyền xóa workspace này. Chỉ chủ sở hữu mới có thể xóa.'
+      });
+    }
+
+    // Lấy danh sách task_id trong workspace để xóa các bản ghi liên quan
+    const getTasksSql = "SELECT id FROM task WHERE workspace_id = ?";
+    con.query(getTasksSql, [workspaceId], function(getTasksErr, taskResults) {
+      if (getTasksErr) {
+        console.error('Error getting tasks: ' + getTasksErr.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi lấy danh sách task: ' + getTasksErr.message
+        });
+      }
+
+      const taskIds = taskResults.map(task => task.id);
+      const tasksCount = taskIds.length;
+
+      // Xóa các bản ghi liên quan đến task trước (nếu có task)
+      if (taskIds.length > 0) {
+        const placeholders = taskIds.map(() => '?').join(',');
+        
+        // Xóa assign_task
+        const deleteAssignTaskSql = `DELETE FROM assign_task WHERE task_id IN (${placeholders})`;
+        con.query(deleteAssignTaskSql, taskIds, function(deleteAssignErr) {
+          if (deleteAssignErr) {
+            console.error('Error deleting assign_task: ' + deleteAssignErr.stack);
+          } else {
+            console.log(`[Workspace Delete] Deleted assign_task records for ${taskIds.length} tasks`);
+          }
+        });
+
+        // Xóa task_reminder
+        const deleteReminderSql = `DELETE FROM task_reminder WHERE task_id IN (${placeholders})`;
+        con.query(deleteReminderSql, taskIds, function(deleteReminderErr) {
+          if (deleteReminderErr) {
+            console.error('Error deleting task_reminder: ' + deleteReminderErr.stack);
+          } else {
+            console.log(`[Workspace Delete] Deleted task_reminder records for ${taskIds.length} tasks`);
+          }
+        });
+      }
+
+      // Xóa tất cả task trong workspace
+      const deleteTasksSql = "DELETE FROM task WHERE workspace_id = ?";
+      con.query(deleteTasksSql, [workspaceId], function(deleteTasksErr, deleteTasksResult) {
+        if (deleteTasksErr) {
+          console.error('Error deleting tasks: ' + deleteTasksErr.stack);
+          return res.status(500).json({
+            success: false,
+            error: 'Lỗi xóa các task trong workspace: ' + deleteTasksErr.message
+          });
+        }
+
+        console.log(`[Workspace Delete] Deleted ${deleteTasksResult.affectedRows} tasks from workspace ${workspaceId}`);
+
+        // Xóa tất cả workspace_user (permissions) trong workspace
+        const deleteWorkspaceUsersSql = "DELETE FROM workspace_user WHERE workspace_id = ?";
+        con.query(deleteWorkspaceUsersSql, [workspaceId], function(deleteUsersErr) {
+          if (deleteUsersErr) {
+            console.error('Error deleting workspace users: ' + deleteUsersErr.stack);
+            // Tiếp tục xóa workspace dù có lỗi xóa users
+          }
+
+          // Xóa workspace
+          const deleteSql = "DELETE FROM workspace WHERE id = ?";
+          con.query(deleteSql, [workspaceId], function(deleteErr, result) {
+            if (deleteErr) {
+              console.error('Error deleting workspace: ' + deleteErr.stack);
+              return res.status(500).json({
+                success: false,
+                error: 'Lỗi xóa workspace: ' + deleteErr.message
+              });
+            }
+
+            // Tạo notification cho user khi xóa workspace
+            const insertNotificationSql = `
+              INSERT INTO notification (workspace_id, workspace_name, type, message, user_id, is_read)
+              VALUES (?, ?, 'workspace_deleted', ?, ?, 0)
+            `;
+            const notificationMessage = `Bạn đã xóa không gian làm việc: "${workspaceName}"`;
+            
+            con.query(insertNotificationSql, [workspaceId, workspaceName, notificationMessage, ownerId], function(notifErr) {
+              if (notifErr) {
+                console.error('Error creating notification: ' + notifErr.stack);
+              } else {
+                console.log(`[Notification] Created notification for deleted workspace ${workspaceId}`);
+              }
+            });
+
+            res.json({
+              success: true,
+              message: 'Xóa workspace thành công',
+              deletedTasksCount: deleteTasksResult.affectedRows || 0
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
+// API: Lấy danh sách phân quyền của workspace
+app.get('/api/workspace/:id/permission', function (req, res) {
+  const workspaceId = req.params.id;
+  
+  if (!workspaceId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID workspace là bắt buộc'
+    });
+  }
+  
+  const sql = `
+    SELECT 
+      wu.id,
+      wu.workspace_id,
+      wu.user_id,
+      wu.role,
+      wu.createdAt,
+      wu.updatedAt,
+      u.name,
+      u.email,
+      u.avatar
+    FROM workspace_user wu
+    INNER JOIN user u ON wu.user_id = u.id
+    WHERE wu.workspace_id = ? AND wu.role = 'member'
+    ORDER BY wu.id DESC
+  `;
+  
+  con.query(sql, [workspaceId], function(err, results) {
+    if (err) {
+      console.error('Error fetching workspace users: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi lấy danh sách phân quyền: ' + err.message
+      });
+    }
+    
+    res.json({
+      success: true,
+      workspaceUsers: results,
+      count: results.length
+    });
+  });
+});
+
+// API: Lưu danh sách phân quyền của workspace
+app.post('/api/workspace/:id/permission', function (req, res) {
+  const workspaceId = req.params.id;
+  const { user_ids } = req.body; // Array of user IDs
+  
+  if (!workspaceId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID workspace là bắt buộc'
+    });
+  }
+  
+  if (!Array.isArray(user_ids)) {
+    return res.status(400).json({
+      success: false,
+      error: 'user_ids phải là một mảng'
+    });
+  }
+  
+  // Kiểm tra workspace có tồn tại không
+  const checkWorkspaceSql = "SELECT id, created_by FROM workspace WHERE id = ?";
+  con.query(checkWorkspaceSql, [workspaceId], function(err, workspaceResults) {
+    if (err) {
+      console.error('Error checking workspace: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra workspace'
+      });
+    }
+    
+    if (workspaceResults.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Workspace không tồn tại'
+      });
+    }
+    
+    const ownerId = workspaceResults[0].created_by;
+    
+    // Xóa tất cả member của workspace này (trừ owner)
+    const deleteSql = "DELETE FROM workspace_user WHERE workspace_id = ? AND role = 'member'";
+    con.query(deleteSql, [workspaceId], function(deleteErr) {
+      if (deleteErr) {
+        console.error('Error deleting old permissions: ' + deleteErr.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi xóa danh sách phân quyền cũ: ' + deleteErr.message
+        });
+      }
+      
+      const insertMembers = (callback) => {
+        if (user_ids.length === 0) {
+          return callback(null);
+        }
+
+        // Kiểm tra các user có tồn tại không
+        const placeholders = user_ids.map(() => '?').join(',');
+        const checkUsersSql = `SELECT id FROM user WHERE id IN (${placeholders})`;
+        con.query(checkUsersSql, user_ids, function(checkErr, userResults) {
+          if (checkErr) {
+            console.error('Error checking users: ' + checkErr.stack);
+            return res.status(500).json({
+              success: false,
+              error: 'Lỗi kiểm tra user'
+            });
+          }
+          
+          if (userResults.length !== user_ids.length) {
+            return res.status(400).json({
+              success: false,
+              error: 'Một số user không tồn tại'
+            });
+          }
+
+          const now = new Date();
+          const values = user_ids.map(userId => [workspaceId, userId, 'member', now, now]);
+          const insertSql = `
+            INSERT INTO workspace_user (workspace_id, user_id, role, createdAt, updatedAt)
+            VALUES ?
+          `;
+
+          con.query(insertSql, [values], function(insertErr) {
+            if (insertErr) {
+              console.error('Error inserting workspace users: ' + insertErr.stack);
+              return res.status(500).json({
+                success: false,
+                error: 'Lỗi lưu danh sách phân quyền: ' + insertErr.message
+              });
+            }
+
+            // Lấy thông tin workspace để gửi notification
+            const getWorkspaceInfoSql = "SELECT id, name FROM workspace WHERE id = ?";
+            con.query(getWorkspaceInfoSql, [workspaceId], function(workspaceInfoErr, workspaceInfoResults) {
+              if (workspaceInfoErr || workspaceInfoResults.length === 0) {
+                console.error('Error getting workspace info for notification:', workspaceInfoErr);
+                return callback(null);
+              }
+
+              const workspace = workspaceInfoResults[0];
+              const workspaceName = workspace.name;
+              const deepLink = `mobilenote://workspace/${workspaceId}`;
+
+              // Lấy thông tin owner để tạo message
+              const getOwnerSql = "SELECT name FROM user WHERE id = ?";
+              con.query(getOwnerSql, [ownerId], function(ownerErr, ownerResults) {
+                const ownerName = ownerErr || ownerResults.length === 0 ? 'Ai đó' : ownerResults[0].name;
+
+                // Gửi notification cho từng member
+                let notificationCount = 0;
+                user_ids.forEach((memberId) => {
+                  const title = 'Bạn đã được thêm vào không gian làm việc';
+                  const body = `${ownerName} đã thêm bạn vào không gian làm việc "${workspaceName}"`;
+                  
+                  sendNotificationToUser(
+                    memberId,
+                    title,
+                    body,
+                    'workspace_assigned',
+                    null,
+                    null,
+                    workspaceId,
+                    workspaceName,
+                    deepLink,
+                    function(notifErr, notifResult) {
+                      if (notifErr) {
+                        console.error(`[Workspace Assign] Error sending notification to user ${memberId}:`, notifErr);
+                      } else {
+                        console.log(`[Workspace Assign] Notification sent to user ${memberId}`);
+                      }
+                      notificationCount++;
+                      if (notificationCount === user_ids.length) {
+                        callback(null);
+                      }
+                    }
+                  );
+                });
+
+                // Nếu không có member nào, vẫn gọi callback
+                if (user_ids.length === 0) {
+                  callback(null);
+                }
+              });
+            });
+          });
+        });
+      };
+
+      insertMembers(function() {
+        // Đảm bảo đã có bản ghi owner
+        const checkOwnerSql = "SELECT id FROM workspace_user WHERE workspace_id = ? AND role = 'owner'";
+        con.query(checkOwnerSql, [workspaceId], function(checkOwnerErr, ownerRows) {
+          if (checkOwnerErr) {
+            console.error('Error checking owner: ' + checkOwnerErr.stack);
+            return res.status(500).json({
+              success: false,
+              error: 'Lỗi kiểm tra owner'
+            });
+          }
+
+          const proceedFetch = () => {
+            const fetchSql = `
+              SELECT 
+                wu.id,
+                wu.workspace_id,
+                wu.user_id,
+                wu.role,
+                wu.createdAt,
+                wu.updatedAt,
+                u.name,
+                u.email,
+                u.avatar
+              FROM workspace_user wu
+              INNER JOIN user u ON wu.user_id = u.id
+              WHERE wu.workspace_id = ? AND wu.role = 'member'
+              ORDER BY wu.id DESC
+            `;
+            con.query(fetchSql, [workspaceId], function(fetchErr, fetchResults) {
+              if (fetchErr) {
+                console.error('Error fetching workspace users: ' + fetchErr.stack);
+                return res.status(500).json({
+                  success: false,
+                  error: 'Lỗi lấy danh sách phân quyền: ' + fetchErr.message
+                });
+              }
+
+              res.json({
+                success: true,
+                message: 'Cập nhật phân quyền thành công',
+                workspaceUsers: fetchResults,
+                count: fetchResults.length
+              });
+            });
+          };
+
+          if (ownerRows.length === 0 && ownerId) {
+            const insertOwnerSql = `
+              INSERT INTO workspace_user (workspace_id, user_id, role, createdAt, updatedAt)
+              VALUES (?, ?, 'owner', NOW(), NOW())
+            `;
+            con.query(insertOwnerSql, [workspaceId, ownerId], function(insertOwnerErr) {
+              if (insertOwnerErr) {
+                console.error('Error inserting owner: ' + insertOwnerErr.stack);
+                return res.status(500).json({
+                  success: false,
+                  error: 'Lỗi lưu thông tin owner'
+                });
+              }
+              proceedFetch();
+            });
+          } else {
+            proceedFetch();
+          }
+        });
+      });
+    });
+  });
+});
+
+// API: Cập nhật task
+app.put('/api/task/:id', function (req, res) {
+  const taskId = req.params.id;
+  const { name, description, status, priority, start_date, due_date, completed_date, reminder_date, reminder_config, workspace_id } = req.body;
+
+  if (!taskId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID task là bắt buộc'
+    });
+  }
+
+  // Kiểm tra task có tồn tại không
+  const checkTaskSql = "SELECT id FROM task WHERE id = ?";
+  con.query(checkTaskSql, [taskId], function(err, taskResults) {
+    if (err) {
+      console.error('Error checking task: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra task'
+      });
+    }
+
+    if (taskResults.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Task không tồn tại'
+      });
+    }
+
+    // Lấy task hiện tại để giữ các giá trị không được cập nhật
+    const getCurrentTaskSql = "SELECT * FROM task WHERE id = ?";
+    con.query(getCurrentTaskSql, [taskId], function(getCurrentErr, currentTaskResults) {
+      if (getCurrentErr || currentTaskResults.length === 0) {
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi lấy thông tin task hiện tại'
+        });
+      }
+
+      const currentTask = currentTaskResults[0];
+
+      // Kiểm tra workspace có tồn tại không (nếu có workspace_id và được cập nhật)
+      if (workspace_id !== undefined && workspace_id !== null) {
+        const checkWorkspaceSql = "SELECT id FROM workspace WHERE id = ?";
+        con.query(checkWorkspaceSql, [workspace_id], function(workspaceErr, workspaceResults) {
+          if (workspaceErr) {
+            return res.status(500).json({
+              success: false,
+              error: 'Lỗi kiểm tra workspace'
+            });
+          }
+
+          if (workspaceResults.length === 0) {
+            return res.status(400).json({
+              success: false,
+              error: 'Workspace không tồn tại'
+            });
+          }
+
+          // Cập nhật task với workspace_id
+          updateTask();
+        });
+      } else {
+        // Cập nhật task không có workspace_id
+        updateTask();
+      }
+
+      function updateTask() {
+        // Cập nhật task - chỉ update các trường được gửi lên
+        const updateSql = `
+          UPDATE task 
+          SET name = ?, 
+              description = ?, 
+              status = ?, 
+              priority = ?, 
+              start_date = ?, 
+              due_date = ?, 
+              completed_date = ?,
+              reminder_date = ?,
+              reminder_config = ?,
+              workspace_id = ?,
+              updatedAt = NOW()
+          WHERE id = ?
+        `;
+
+        const values = [
+          name !== undefined ? name : currentTask.name,
+          description !== undefined ? description : currentTask.description,
+          status !== undefined ? status : currentTask.status,
+          priority !== undefined ? priority : currentTask.priority,
+          start_date !== undefined ? start_date : currentTask.start_date,
+          due_date !== undefined ? due_date : currentTask.due_date,
+          completed_date !== undefined ? completed_date : currentTask.completed_date,
+          reminder_date !== undefined ? reminder_date : currentTask.reminder_date,
+          reminder_config !== undefined ? reminder_config : currentTask.reminder_config,
+          workspace_id !== undefined ? workspace_id : currentTask.workspace_id,
+          taskId
+        ];
+
+      con.query(updateSql, values, function(updateErr, result) {
+        if (updateErr) {
+          console.error('Error updating task: ' + updateErr.stack);
+          return res.status(500).json({
+            success: false,
+            error: 'Lỗi cập nhật task: ' + updateErr.message
+          });
+        }
+
+        // Lấy task đã cập nhật
+        const getTaskSql = "SELECT * FROM task WHERE id = ?";
+        con.query(getTaskSql, [taskId], function(getErr, updatedTaskResults) {
+          if (getErr) {
+            console.error('Error getting updated task: ' + getErr.stack);
+            return res.status(500).json({
+              success: false,
+              error: 'Lỗi lấy thông tin task đã cập nhật'
+            });
+          }
+
+          const updatedTask = updatedTaskResults[0];
+          
+          // Tạo notification cho user khi cập nhật task
+          const insertNotificationSql = `
+            INSERT INTO notification (task_id, task_name, type, message, user_id, is_read)
+            VALUES (?, ?, 'task_updated', ?, ?, 0)
+          `;
+          const notificationMessage = `Bạn đã cập nhật nhiệm vụ: "${updatedTask.name}"`;
+          
+          con.query(insertNotificationSql, [taskId, updatedTask.name, notificationMessage, updatedTask.created_by], function(notifErr) {
+            if (notifErr) {
+              console.error('Error creating notification: ' + notifErr.stack);
+            } else {
+              console.log(`[Notification] Created notification for updated task ${taskId}`);
+            }
+          });
+
+          res.json({
+            success: true,
+            message: 'Cập nhật task thành công',
+            task: updatedTask
+          });
+        });
+      });
+      }
+    });
+  });
+});
+
+// API: Xóa task
+app.delete('/api/task/:id', function (req, res) {
+  const taskId = req.params.id;
+
+  if (!taskId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID task là bắt buộc'
+    });
+  }
+
+  // Kiểm tra task có tồn tại không và lấy thông tin để tạo notification
+  const checkTaskSql = "SELECT id, name, created_by FROM task WHERE id = ?";
+  con.query(checkTaskSql, [taskId], function(err, taskResults) {
+    if (err) {
+      console.error('Error checking task: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra task'
+      });
+    }
+
+    if (taskResults.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Task không tồn tại'
+      });
+    }
+
+    const task = taskResults[0];
+    const taskName = task.name;
+    const userId = task.created_by;
+
+    // Xóa task
+    const deleteSql = "DELETE FROM task WHERE id = ?";
+    con.query(deleteSql, [taskId], function(deleteErr, result) {
+      if (deleteErr) {
+        console.error('Error deleting task: ' + deleteErr.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi xóa task: ' + deleteErr.message
+        });
+      }
+
+      // Tạo notification cho user khi xóa task
+      const insertNotificationSql = `
+        INSERT INTO notification (task_id, task_name, type, message, user_id, is_read)
+        VALUES (?, ?, 'task_deleted', ?, ?, 0)
+      `;
+      const notificationMessage = `Bạn đã xóa nhiệm vụ: "${taskName}"`;
+      
+      con.query(insertNotificationSql, [taskId, taskName, notificationMessage, userId], function(notifErr) {
+        if (notifErr) {
+          console.error('Error creating notification: ' + notifErr.stack);
+        } else {
+          console.log(`[Notification] Created notification for deleted task ${taskId}`);
+        }
+      });
+
+      res.json({
+        success: true,
+        message: 'Xóa task thành công'
+      });
+    });
+  });
+});
+
+// API: Lấy danh sách đã giao của task
+app.get('/api/task/:id/assign', function (req, res) {
+  const taskId = req.params.id;
+  
+  if (!taskId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID task là bắt buộc'
+    });
+  }
+  
+  const sql = `
+    SELECT 
+      at.id,
+      at.task_id,
+      at.user_id,
+      at.role,
+      at.createdAt,
+      at.updatedAt,
+      u.name,
+      u.email,
+      u.avatar
+    FROM assign_task at
+    INNER JOIN user u ON at.user_id = u.id
+    WHERE at.task_id = ? AND at.role = 'assignee'
+    ORDER BY at.id DESC
+  `;
+  
+  con.query(sql, [taskId], function(err, results) {
+    if (err) {
+      console.error('Error fetching assigned users: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi lấy danh sách đã giao: ' + err.message
+      });
+    }
+    
+    res.json({
+      success: true,
+      assignedUsers: results,
+      count: results.length
+    });
+  });
+});
+
+// API: Lưu danh sách đã giao của task
+app.post('/api/task/:id/assign', function (req, res) {
+  const taskId = req.params.id;
+  const { assignee_ids } = req.body; // Array of user IDs
+  
+  if (!taskId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID task là bắt buộc'
+    });
+  }
+  
+  if (!Array.isArray(assignee_ids)) {
+    return res.status(400).json({
+      success: false,
+      error: 'assignee_ids phải là một mảng'
+    });
+  }
+  
+  // Kiểm tra task có tồn tại không
+  const checkTaskSql = "SELECT id, created_by FROM task WHERE id = ?";
+  con.query(checkTaskSql, [taskId], function(err, taskResults) {
+    if (err) {
+      console.error('Error checking task: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra task'
+      });
+    }
+    
+    if (taskResults.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Task không tồn tại'
+      });
+    }
+    
+    const assignerId = taskResults[0].created_by;
+    
+    // Xóa tất cả assign (role assignee) của task này
+    const deleteSql = "DELETE FROM assign_task WHERE task_id = ? AND role = 'assignee'";
+    con.query(deleteSql, [taskId], function(deleteErr) {
+      if (deleteErr) {
+        console.error('Error deleting old assigns: ' + deleteErr.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi xóa danh sách đã giao cũ: ' + deleteErr.message
+        });
+      }
+      
+      const insertAssignees = (callback) => {
+        if (assignee_ids.length === 0) {
+          return callback(null);
+        }
+
+        // Kiểm tra các user có tồn tại không
+        const placeholders = assignee_ids.map(() => '?').join(',');
+        const checkUsersSql = `SELECT id FROM user WHERE id IN (${placeholders})`;
+        con.query(checkUsersSql, assignee_ids, function(checkErr, userResults) {
+          if (checkErr) {
+            console.error('Error checking users: ' + checkErr.stack);
+            return res.status(500).json({
+              success: false,
+              error: 'Lỗi kiểm tra user'
+            });
+          }
+          
+          if (userResults.length !== assignee_ids.length) {
+            return res.status(400).json({
+              success: false,
+              error: 'Một số user không tồn tại'
+            });
+          }
+
+          const now = new Date();
+          const values = assignee_ids.map(userId => [taskId, userId, 'assignee', now, now]);
+          const insertSql = `
+            INSERT INTO assign_task (task_id, user_id, role, createdAt, updatedAt)
+            VALUES ?
+          `;
+
+          con.query(insertSql, [values], function(insertErr) {
+            if (insertErr) {
+              console.error('Error inserting assigns: ' + insertErr.stack);
+              return res.status(500).json({
+                success: false,
+                error: 'Lỗi lưu danh sách đã giao: ' + insertErr.message
+              });
+            }
+
+            // Lấy thông tin task để gửi notification
+            const getTaskInfoSql = "SELECT id, name FROM task WHERE id = ?";
+            con.query(getTaskInfoSql, [taskId], function(taskInfoErr, taskInfoResults) {
+              if (taskInfoErr || taskInfoResults.length === 0) {
+                console.error('Error getting task info for notification:', taskInfoErr);
+                return callback(null);
+              }
+
+              const task = taskInfoResults[0];
+              const taskName = task.name;
+              const deepLink = `mobilenote://task/${taskId}`;
+
+              // Lấy thông tin assigner để tạo message
+              const getAssignerSql = "SELECT name FROM user WHERE id = ?";
+              con.query(getAssignerSql, [assignerId], function(assignerErr, assignerResults) {
+                const assignerName = assignerErr || assignerResults.length === 0 ? 'Ai đó' : assignerResults[0].name;
+
+                // Gửi notification cho từng assignee
+                let notificationCount = 0;
+                assignee_ids.forEach((assigneeId) => {
+                  const title = 'Đã giao nhiệm vụ cho bạn';
+                  const body = `${assignerName} đã giao nhiệm vụ "${taskName}" cho bạn`;
+                  
+                  sendNotificationToUser(
+                    assigneeId,
+                    title,
+                    body,
+                    'task_assigned',
+                    taskId,
+                    taskName,
+                    null,
+                    null,
+                    deepLink,
+                    function(notifErr, notifResult) {
+                      if (notifErr) {
+                        console.error(`[Task Assign] Error sending notification to user ${assigneeId}:`, notifErr);
+                      } else {
+                        console.log(`[Task Assign] Notification sent to user ${assigneeId}`);
+                      }
+                      notificationCount++;
+                      if (notificationCount === assignee_ids.length) {
+                        callback(null);
+                      }
+                    }
+                  );
+                });
+
+                // Nếu không có assignee nào, vẫn gọi callback
+                if (assignee_ids.length === 0) {
+                  callback(null);
+                }
+              });
+            });
+          });
+        });
+      };
+
+      insertAssignees(function() {
+        // Đảm bảo đã có bản ghi assigner
+        const checkAssignerSql = "SELECT id FROM assign_task WHERE task_id = ? AND role = 'assigner'";
+        con.query(checkAssignerSql, [taskId], function(checkAssignerErr, assignerRows) {
+          if (checkAssignerErr) {
+            console.error('Error checking assigner: ' + checkAssignerErr.stack);
+            return res.status(500).json({
+              success: false,
+              error: 'Lỗi kiểm tra người giao'
+            });
+          }
+
+          const proceedFetch = () => {
+            const getAssignSql = `
+              SELECT 
+                at.id,
+                at.task_id,
+                at.user_id,
+                at.role,
+                at.createdAt,
+                at.updatedAt,
+                u.name,
+                u.email,
+                u.avatar
+              FROM assign_task at
+              INNER JOIN user u ON at.user_id = u.id
+              WHERE at.task_id = ? AND at.role = 'assignee'
+              ORDER BY at.id DESC
+            `;
+
+            con.query(getAssignSql, [taskId], function(getErr, assignResults) {
+              if (getErr) {
+                console.error('Error getting assigned users: ' + getErr.stack);
+                return res.status(500).json({
+                  success: false,
+                  error: 'Lỗi lấy danh sách đã giao'
+                });
+              }
+              
+              res.json({
+                success: true,
+                message: 'Cập nhật danh sách đã giao thành công',
+                assignedUsers: assignResults
+              });
+            });
+          };
+
+          if (assignerRows.length === 0 && assignerId) {
+            const insertAssignerSql = `
+              INSERT INTO assign_task (task_id, user_id, role, createdAt, updatedAt)
+              VALUES (?, ?, 'assigner', NOW(), NOW())
+            `;
+            con.query(insertAssignerSql, [taskId, assignerId], function(insertAssignerErr) {
+              if (insertAssignerErr) {
+                console.error('Error inserting assigner: ' + insertAssignerErr.stack);
+                return res.status(500).json({
+                  success: false,
+                  error: 'Lỗi lưu thông tin người giao'
+                });
+              }
+              proceedFetch();
+            });
+          } else {
+            proceedFetch();
+          }
+        });
+      });
+    });
+  });
+});
+
+// API: Xóa một user khỏi danh sách đã giao
+app.delete('/api/task/:id/assign/:assignId', function (req, res) {
+  const taskId = req.params.id;
+  const assignId = req.params.assignId;
+  
+  if (!taskId || !assignId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID task và ID assign là bắt buộc'
+    });
+  }
+  
+  const deleteSql = "DELETE FROM assign_task WHERE id = ? AND task_id = ?";
+  con.query(deleteSql, [assignId, taskId], function(err, result) {
+    if (err) {
+      console.error('Error deleting assign: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi xóa user khỏi danh sách đã giao: ' + err.message
+      });
+    }
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Không tìm thấy bản ghi để xóa'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Xóa user khỏi danh sách đã giao thành công'
+    });
+  });
+});
+
+// API: Lấy danh sách notification
+app.get('/api/notification', function (req, res) {
+  const { user_id } = req.query;
+  
+  if (!user_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'user_id là bắt buộc'
+    });
+  }
+
+  // Lấy danh sách notification của user
+  const sql = `
+    SELECT 
+      id,
+      task_id,
+      workspace_id,
+      task_name,
+      workspace_name,
+      type,
+      message,
+      is_read,
+      created_at
+    FROM notification
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+  `;
+  
+  con.query(sql, [user_id], function(err, results) {
+    if (err) {
+      console.error('Error fetching notifications: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi lấy danh sách notification: ' + err.message
+      });
+    }
+    
+    res.json({
+      success: true,
+      notifications: results
+    });
+  });
+});
+
+// API: Lấy số lượng thông báo chưa đọc
+app.get('/api/notification/unread-count', function (req, res) {
+  const { user_id } = req.query;
+  
+  if (!user_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'user_id là bắt buộc'
+    });
+  }
+
+  // Đếm số thông báo chưa đọc
+  const sql = `
+    SELECT COUNT(*) as unread_count
+    FROM notification
+    WHERE user_id = ? AND (is_read = 0 OR is_read = false)
+  `;
+  
+  con.query(sql, [user_id], function(err, results) {
+    if (err) {
+      console.error('Error counting unread notifications: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi đếm số thông báo chưa đọc: ' + err.message
+      });
+    }
+    
+    const unreadCount = results[0]?.unread_count || 0;
+    
+    res.json({
+      success: true,
+      unreadCount: unreadCount
+    });
+  });
+});
+
+// API: Đánh dấu notification đã đọc
+app.put('/api/notification/:id/read', function (req, res) {
+  const notificationId = req.params.id;
+  
+  if (!notificationId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID notification là bắt buộc'
+    });
+  }
+
+  const sql = "UPDATE notification SET is_read = 1 WHERE id = ?";
+  
+  con.query(sql, [notificationId], function(err, result) {
+    if (err) {
+      console.error('Error updating notification: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi cập nhật notification: ' + err.message
+      });
+    }
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Không tìm thấy notification'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Đã đánh dấu notification đã đọc'
+    });
+  });
+});
+
+// API: Xóa tất cả notification đã đọc (PHẢI ĐẶT TRƯỚC route /api/notification/:id)
+app.delete('/api/notification/read', function (req, res) {
+  const { user_id } = req.query;
+  
+  if (!user_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'user_id là bắt buộc'
+    });
+  }
+
+  // Xóa tất cả notification đã đọc (is_read = 1 hoặc is_read = true)
+  // MySQL tinyint(1) có thể trả về 1 hoặc true
+  const sql = "DELETE FROM notification WHERE user_id = ? AND (is_read = 1 OR is_read = true OR is_read = '1')";
+  
+  con.query(sql, [user_id], function(err, result) {
+    if (err) {
+      console.error('Error deleting read notifications: ' + err.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi xóa notification đã đọc: ' + err.message
+      });
+    }
+    
+    // Trả về success ngay cả khi không có notification nào để xóa (affectedRows = 0)
+    res.json({
+      success: true,
+      message: 'Xóa tất cả notification đã đọc thành công',
+      deletedCount: result.affectedRows || 0
+    });
+  });
+});
+
+// API: Xóa một notification (PHẢI ĐẶT SAU route /api/notification/read)
+app.delete('/api/notification/:id', function (req, res) {
+  const notificationId = req.params.id;
+  const { user_id } = req.query;
+  
+  if (!notificationId) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID notification là bắt buộc'
+    });
+  }
+
+  if (!user_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'user_id là bắt buộc để xác thực quyền xóa'
+    });
+  }
+
+  // Kiểm tra notification có thuộc về user này không
+  const checkSql = "SELECT id FROM notification WHERE id = ? AND user_id = ?";
+  con.query(checkSql, [notificationId, user_id], function(checkErr, checkResults) {
+    if (checkErr) {
+      console.error('Error checking notification: ' + checkErr.stack);
+      return res.status(500).json({
+        success: false,
+        error: 'Lỗi kiểm tra notification: ' + checkErr.message
+      });
+    }
+    
+    if (checkResults.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Không tìm thấy notification hoặc bạn không có quyền xóa'
+      });
+    }
+
+    const deleteSql = "DELETE FROM notification WHERE id = ? AND user_id = ?";
+    con.query(deleteSql, [notificationId, user_id], function(err, result) {
+      if (err) {
+        console.error('Error deleting notification: ' + err.stack);
+        return res.status(500).json({
+          success: false,
+          error: 'Lỗi xóa notification: ' + err.message
+        });
+      }
+      
+      res.json({
+        success: true,
+        message: 'Xóa notification thành công'
       });
     });
   });

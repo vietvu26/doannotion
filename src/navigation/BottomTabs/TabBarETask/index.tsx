@@ -1,12 +1,12 @@
 import {TouchableOpacity, View} from 'react-native';
 import styles from './styles';
 import TextCM from '../../../app/components/Text';
-import {TabName} from './helper';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {Icon} from '@ui-kitten/components';
 import {Color} from '../../../constants';
+import {NavigationName} from '../../../constants';
 
-const TabBarETask = ({state, navigation, t, totalRecoders}: any) => {
+const TabBarETask = ({state, navigation, totalRecoders = 0}: any) => {
   return (
     <SafeAreaView
       edges={['bottom', 'left', 'right']}
@@ -17,8 +17,68 @@ const TabBarETask = ({state, navigation, t, totalRecoders}: any) => {
           const isFocused = state.index === index;
           function getIcon() {
             switch (route.name) {
-              case TabName.Search:
-                label = t('board.statistical');
+              case NavigationName.ETaskHome:
+                label = 'Trang chủ';
+                return (
+                  <Icon
+                    name={'home-outline'}
+                    fill={isFocused ? '#7C3AED' : 'grey'}
+                    width={24}
+                    height={24}
+                  />
+                );
+              case NavigationName.ETaskStatistics:
+                label = 'Thống kê';
+                return (
+                  <Icon
+                    name={'bar-chart-outline'}
+                    fill={isFocused ? '#7C3AED' : 'grey'}
+                    width={24}
+                    height={24}
+                  />
+                );
+              case NavigationName.ETaskNotification:
+                label = 'Thông báo';
+                return (
+                  <View style={{position: 'relative'}}>
+                    <Icon
+                      name={'bell-outline'}
+                      fill={isFocused ? '#7C3AED' : 'grey'}
+                      width={24}
+                      height={24}
+                    />
+                    {totalRecoders > 0 && (
+                      <View
+                        style={{
+                          position: 'absolute',
+                          backgroundColor: '#E14337',
+                          borderRadius: 10,
+                          minWidth: 18,
+                          height: 18,
+                          paddingHorizontal: totalRecoders > 9 ? 4 : 5,
+                          top: -8,
+                          right: -8,
+                          zIndex: 1,
+                          justifyContent: 'center',
+                          alignItems: 'center',
+                          borderWidth: 2,
+                          borderColor: '#fff',
+                        }}>
+                        <TextCM
+                          style={{
+                            fontSize: 10,
+                            color: '#fff',
+                            fontWeight: 'bold',
+                          }}>
+                          {totalRecoders > 99 ? '99+' : totalRecoders}
+                        </TextCM>
+                      </View>
+                    )}
+                  </View>
+                );
+              // Legacy tab names (for Notion)
+              case 'Search':
+                label = 'Thống kê';
                 return (
                   <Icon
                     name={'bar-chart-outline'}
@@ -27,8 +87,8 @@ const TabBarETask = ({state, navigation, t, totalRecoders}: any) => {
                     height={24}
                   />
                 );
-              case TabName.Editor:
-                label = t('CM.Board');
+              case 'Editor':
+                label = 'Bảng';
                 return (
                   <Icon
                     name={'file-text'}
@@ -37,40 +97,8 @@ const TabBarETask = ({state, navigation, t, totalRecoders}: any) => {
                     height={24}
                   />
                 );
-              // case TabName.Notification:
-              //   label = t('CM.Notification');
-              //   return (
-              //     <View style={{position: 'relative'}}>
-              //       {totalRecoders > 0 && (
-              //         <View
-              //           style={{
-              //             position: 'absolute',
-              //             backgroundColor: '#e14337',
-              //             borderRadius: 100,
-              //             paddingHorizontal: 4,
-              //             paddingVertical: 2,
-              //             top: -5,
-              //             right: totalRecoders > 100 ? -20 : -12,
-              //           }}>
-              //           <TextCM
-              //             style={{
-              //               fontSize: 10,
-              //               color: '#fff',
-              //             }}>
-              //             {totalRecoders < 100 ? totalRecoders : '99+'}
-              //           </TextCM>
-              //         </View>
-              //       )}
-              //       <Icon
-              //         name={'bell'}
-              //         fill={isFocused ? '#ca1e66' : 'grey'}
-              //         width={24}
-              //         height={24}
-              //       />
-              //     </View>
-              //   );
-              case TabName.Home:
-                label = t('CM.Home');
+              case 'Home':
+                label = 'Trang chủ';
                 return (
                   <Icon
                     name={'home'}
